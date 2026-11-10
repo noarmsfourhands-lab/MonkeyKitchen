@@ -37,15 +37,15 @@ function roleOf(agentType = '') {
 
 function describe(tool, input = {}) {
   switch (tool) {
-    case 'Read': return `Reading ${base(input.file_path)}`;
-    case 'Edit': case 'Write': case 'NotebookEdit': return `Writing ${base(input.file_path || input.notebook_path)}`;
-    case 'Grep': return `Searching for "${clip(input.pattern, 24)}"`;
-    case 'Glob': return `Looking for ${clip(input.pattern, 28)}`;
-    case 'Bash': case 'PowerShell': return `Running: ${clip(input.description || input.command, 36)}`;
-    case 'WebFetch': { try { return `Fetching ${new URL(input.url).host}`; } catch { return 'Fetching a page'; } }
-    case 'WebSearch': return `Looking up "${clip(input.query, 26)}"`;
-    case 'Agent': case 'Task': return `Calling the ${ROLE_NAME[roleOf(input.subagent_type)]}`;
-    default: return tool?.startsWith('mcp__') ? `Using ${clip(tool.split('__').pop(), 28)}` : `Using ${clip(tool, 28)}`;
+    case 'Read': return ['read', `Reading ${base(input.file_path)}`];
+    case 'Edit': case 'Write': case 'NotebookEdit': return ['write', `Writing ${base(input.file_path || input.notebook_path)}`];
+    case 'Grep': return ['search', `Searching for "${clip(input.pattern, 24)}"`];
+    case 'Glob': return ['search', `Looking for ${clip(input.pattern, 28)}`];
+    case 'Bash': case 'PowerShell': return ['run', `Running: ${clip(input.description || input.command, 36)}`];
+    case 'WebFetch': { try { return ['web', `Fetching ${new URL(input.url).host}`]; } catch { return ['web', 'Fetching a page']; } }
+    case 'WebSearch': return ['web', `Looking up "${clip(input.query, 26)}"`];
+    case 'Agent': case 'Task': return ['delegate', `Calling the ${ROLE_NAME[roleOf(input.subagent_type)]}`];
+    default: return ['tool', tool?.startsWith('mcp__') ? `Using ${clip(tool.split('__').pop(), 28)}` : `Using ${clip(tool, 28)}`];
   }
 }
 
@@ -55,7 +55,7 @@ function getSession(p) {
     s = {
       id: p.session_id, cwd: p.cwd, project: base(p.cwd) || 'session', startedAt: Date.now(), lastEventAt: Date.now(),
       order: null, chef: { status: 'idle', activity: '' }, cooks: new Map(), pending: [], feed: [],
-      dropped: 0, usage: null, meter: null, scanTimer: null,
+      dropped: 0, lastDrop: null, usage: null, meter: null, scanTimer: null,
     };
     sessions.set(s.id, s);
   }
@@ -73,7 +73,7 @@ function say(s, who, text, fail = false) {
 function getCook(s, p) {
   let c = s.cooks.get(p.agent_id);
   if (!c) {
-    c = { id: p.agent_id, agentType: p.agent_type || '', role: roleOf(p.agent_type), ticket: '', activity: '', status: 'working', startedAt: Date.now(), endedAt: 0, tools: 0 };
+    c = { id: p.agent_id, agentType: p.agent_type || '', role: roleOf(p.agent_type), ticket: '', activity: '', kind: 'think', status: 'working', startedAt: Date.now(), endedAt: 0, tools: 0 };
     // Pick up the ticket the Head Chef wrote when calling the Agent tool.
     const i = s.pending.findIndex(t => roleOf(t.type) === c.role);
     if (i >= 0) c.ticket = s.pending.splice(i, 1)[0].ticket;
@@ -98,17 +98,17 @@ function handle(p) {
       // New order: clear finished tickets off the rail.
       for (const [id, c] of s.cooks) if (c.status !== 'working') s.cooks.delete(id);
       s.order = { text: clip(p.prompt, 400), startedAt: Date.now(), status: 'cooking' };
-      s.chef = { status: 'working', activity: 'Reading the order' };
+      s.chef = { status: 'working', activity: 'Reading the order', kind: 'think' };
       say(s, 'head-chef', `new order: ${clip(p.prompt, 90)}`);
       break;
 
     case 'PreToolUse': {
-      const what = describe(p.tool_name, p.tool_input);
+      const [kind, what] = describe(p.tool_name, p.tool_input);
       if (fromCook) {
         const c = getCook(s, p);
-        c.activity = what; c.tools++; c.status = 'working';
+        c.activity = what; c.kind = kind; c.tools++; c.status = 'working';
       } else {
-        s.chef = { status: 'working', activity: what };
+        s.chef = { status: 'working', activity: what, kind };
         if (s.order && s.order.status !== 'cooking') s.order.status = 'cooking';
       }
       if (p.tool_name === 'Agent' || p.tool_name === 'Task') {
@@ -127,6 +127,7 @@ function handle(p) {
 
     case 'PostToolUseFailure':
       s.dropped++;
+      s.lastDrop = { by: p.agent_id || 'head-chef', n: s.dropped };
       say(s, who, `dropped a plate (${p.tool_name})`, true);
       if (p.tool_name === 'Agent' || p.tool_name === 'Task') {
         const role = roleOf(p.tool_input?.subagent_type);
@@ -183,7 +184,7 @@ function scheduleScan(s, delay) {
 function snapshot() {
   const list = [...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).slice(0, 12).map(s => ({
     id: s.id, project: s.project, order: s.order, chef: s.chef,
-    cooks: [...s.cooks.values()], feed: s.feed.slice(-60), dropped: s.dropped, usage: s.usage,
+    cooks: [...s.cooks.values()], feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage: s.usage,
   }));
   return { now: Date.now(), sessions: list };
 }

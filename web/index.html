@@ -9,50 +9,49 @@
 </head>
 <body>
 <header class="topbar">
-  <h1>🐵 Monkey Kitchen</h1>
+  <h1>MONKEY KITCHEN</h1>
   <div class="order" id="order">
-    <span class="order-label">Order up</span>
-    <span class="order-text" id="order-text">The kitchen is quiet. Send an order from Claude Code.</span>
+    <span class="order-label">Order</span>
+    <span class="order-text" id="order-text">No order yet. Send one from Claude Code.</span>
   </div>
-  <div class="topbar-right">
-    <select id="session-pick" title="Which Claude Code session to watch" hidden></select>
-    <span class="conn" id="conn" title="Connection to the kitchen server">●</span>
-  </div>
+  <select id="session-pick" title="Which Claude Code session to watch" hidden></select>
+  <span class="conn" id="conn" title="Connection to the kitchen server"></span>
 </header>
 
 <main class="layout">
-  <section class="scene-wrap">
-    <div class="scene" id="scene">
-      <div class="backdrop" id="backdrop"></div>
-      <div class="rail" id="rail"></div>
-      <div class="fire-sign" id="fire-sign">
-        <b id="fire-count">0</b>
-        <span>plates dropped today</span>
+  <section class="screen">
+    <div class="scene">
+      <canvas id="game" width="960" height="544"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="hud">PLATES DROPPED <b id="dropped">0</b></div>
       </div>
-      <div class="stations" id="stations"></div>
-      <div class="closed" id="closed" hidden>
-        <div>🚪 Kitchen's closed<br><small>The server isn't answering. It restarts on your next prompt.</small></div>
-      </div>
+      <div class="closed" id="closed" hidden><div>KITCHEN CLOSED<small>The server isn't answering. It restarts on your next prompt.</small></div></div>
     </div>
+    <div class="dialog"><p id="dialog-text"></p><span class="more">▼</span></div>
   </section>
 
   <aside class="side">
-    <section class="board">
+    <section class="panel">
+      <h2>Tickets</h2>
+      <ul id="tickets" class="tickets"><li class="muted">No tickets on the rail</li></ul>
+    </section>
+    <section class="panel">
       <h2>Tab so far</h2>
-      <table id="usage">
+      <table>
         <thead><tr><th>Tier</th><th>In</th><th>Out</th><th>Cached</th><th>≈ Cost</th></tr></thead>
         <tbody id="usage-body"><tr><td colspan="5" class="muted">Nothing cooked yet</td></tr></tbody>
       </table>
       <p class="saving" id="saving"></p>
-      <p class="fineprint">Costs are API list prices applied to this session's token counts. On a subscription plan you aren't billed this; read it as relative weight.</p>
+      <p class="fineprint">API list prices applied to this session's tokens. On a subscription you aren't billed this; read it as relative weight.</p>
     </section>
-    <section class="feed">
-      <h2>Kitchen chatter</h2>
-      <ol id="feed"></ol>
+    <section class="panel">
+      <h2>Kitchen log</h2>
+      <ol id="feed" class="feed"></ol>
     </section>
   </aside>
 </main>
 
+<script src="art.js"></script>
 <script src="kitchen.js"></script>
 </body>
 </html>

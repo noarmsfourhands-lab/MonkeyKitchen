@@ -29,6 +29,23 @@ No API key and no dependencies. It needs Node 18 or newer.
 
 Cooks cannot spawn other cooks, so the Head Chef is the only one handing out tickets.
 
+## What you see
+
+The kitchen is a top-down pixel-art room. Each agent is a monkey that walks to the spot matching its current tool call:
+
+| The agent is… | The monkey… |
+|---|---|
+| Reading a file | Goes to the recipe shelf |
+| Searching (grep, glob) | Rummages in the pantry or fridge |
+| Editing or writing | Works its own station: cutting board, grill, stove, pastry bench, sink, menu board, potatoes |
+| Running a command | Cooks at its station (the Pastry Chef uses the oven, the Head Chef takes a stove) |
+| Fetching from the web | Leaves by the back door and returns with a crate |
+| Delegating (Head Chef) | Turns from the pass and calls the order |
+| Finished | Carries a plate to the pass, then goes back on break |
+| Waiting for your permission | The Head Chef waves at your table |
+
+The Health Inspector patrols with a clipboard, a failed tool call smashes a plate, extra cooks of the same kind come in through the back door, and when the order is done the Head Chef rings the bell and your table gets its plate.
+
 ## Install
 
 From a clone on disk:
