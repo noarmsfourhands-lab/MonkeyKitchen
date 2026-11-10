@@ -1,0 +1,8 @@
+{
+  "name": "monkey-kitchen",
+  "displayName": "Monkey Kitchen",
+  "version": "0.1.0",
+  "description": "A brigade of monkey chefs for Claude Code: routes work to the cheapest capable model and shows the kitchen live at http://localhost:4747.",
+  "license": "MIT",
+  "keywords": ["subagents", "usage", "visualization", "workflow"]
+}

@@ -1,0 +1,9 @@
+{
+  "note": "USD per million tokens, Anthropic API list prices as of 2026-11. Edit freely. input/output and the fable, opus and sonnet cacheRead values are published prices. ASSUMED, not confirmed: every cacheWrite value (1.25x input) and haiku cacheRead (0.1x input). Older models in a transcript are priced at their tier's current rate.",
+  "perMillionTokens": {
+    "fable":  { "input": 8.00, "output": 40.00, "cacheRead": 0.20, "cacheWrite": 10.00 },
+    "opus":   { "input": 4.00, "output": 20.00, "cacheRead": 0.20, "cacheWrite": 5.00 },
+    "sonnet": { "input": 2.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite": 2.50 },
+    "haiku":  { "input": 0.10, "output": 0.50,  "cacheRead": 0.01, "cacheWrite": 0.125 }
+  }
+}

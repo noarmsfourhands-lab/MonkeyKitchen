@@ -1,0 +1,12 @@
+{
+  "name": "monkey-kitchen",
+  "description": "Home of the Monkey Kitchen plugin for Claude Code.",
+  "owner": { "name": "Monkey Kitchen" },
+  "plugins": [
+    {
+      "name": "monkey-kitchen",
+      "source": "./",
+      "description": "A brigade of monkey chefs for Claude Code, with a live animated kitchen and a usage tab."
+    }
+  ]
+}
