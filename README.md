@@ -15,19 +15,31 @@ No API key and no dependencies. It needs Node 18 or newer.
 | Station | Agent | Model | Job |
 |---|---|---|---|
 | Head Chef | your main session | whatever you run (Fable recommended) | Splits the order, delegates, checks the plate |
-| Sous Chef | `sous-chef` | Opus | Design decisions, plans, stubborn bugs (read-only) |
+| Sous Chef | `sous-chef` | Opus | Design decisions, plans, stubborn bugs (can run commands to reproduce, never edits) |
 | Pastry Chef | `frontend-cook` | Sonnet | Front-end work |
 | Grill Cook | `backend-cook` | Sonnet | Back-end work |
 | Line Cook | `line-cook` | Sonnet | Other build work: scripts, config, tooling |
 | Taster | `taster` | Sonnet | Runs tests and checks |
-| Health Inspector | `inspector` | Sonnet | Independent code review (read-only) |
-| Prep Cook | `prep-cook` | Haiku | Finds and reads code, returns summaries (read-only) |
+| Health Inspector | `inspector` | Opus | Independent review of a finished change for bugs, security, and fit to the goal (read-only) |
+| Prep Cook | `prep-cook` | Haiku | Locates and quotes code: paths, signatures, call sites, log errors (read-only). Not for explaining behavior across files |
 | Runner | `runner` | Haiku | Web and docs lookups |
 | Dishwasher | `dishwasher` | Haiku | Mechanical cleanup |
 | Menu Scribe | `scribe` | Haiku | Docs for existing code |
 | Stagiaire | any other agent | varies | Where agents from outside the brigade show up |
 
-Cooks cannot spawn other cooks, so the Head Chef is the only one handing out tickets.
+Cooks cannot spawn other cooks, so the Head Chef is the only one handing out tickets. The Head Chef can run any cook on a stronger model for a single ticket (the Agent tool's `model` parameter), and the kitchen shows the tier a cook actually ran on.
+
+## How the Head Chef works
+
+- Does one- or two-step jobs itself, and keeps any job where the hard part is deciding.
+- Sends prep cooks to find and quote code, and checks one quoted line before trusting a summary.
+- Writes each ticket in full: the goal, the files it may touch, the limits, and the check that proves it done.
+- Sends independent tickets together, and never gives two cooks the same file.
+- Reproduces a bug before fixing it, and gives a builder a cause, not just a symptom.
+- Reruns a failed ticket once on Opus, sends design and understanding problems to the Sous Chef, and takes over if Opus fails.
+- Runs the Taster after build work, and the Health Inspector on risky or large changes.
+- Treats a cook's report as a claim until the check output backs it up.
+- Skips the kitchen for conversation, quick questions, and anything you ask it to do directly.
 
 ## What you see
 
@@ -91,7 +103,9 @@ Claude Code ──hooks──▶ scripts/hook.mjs ──POST /hook──▶ serv
 
 - `hooks/hooks.json` registers the hooks. All but `SessionStart` run in the background, so they never hold up the session.
 - `scripts/hook.mjs` relays each payload and starts the server if it isn't running. It always exits cleanly.
+- `scripts/hook.mjs` stamps each payload with a random id and the time it ran, so the server drops repeats and late events can't reopen a finished cook.
 - `server/server.mjs` turns hook payloads into kitchen state and pushes a snapshot to the page on every change. It listens on `127.0.0.1` only.
+- `server/server.mjs` matches each ticket to a cook using the Agent tool's result, which names the cook's `agentId`. Until that arrives, the oldest unclaimed ticket for the same role is a guess.
 - `server/usage.mjs` reads the session transcript and `subagents/agent-*.jsonl` beside it.
 
 ## Limits of the tab

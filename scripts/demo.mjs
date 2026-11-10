@@ -79,6 +79,7 @@ await sleep(1300);
 const taste = cook('a5', 'taster'), wash = cook('a6', 'dishwasher'), guest = { agent_id: 'a7', agent_type: 'Explore' };
 call('taster', 'Run the test suite and the build');
 call('dishwasher', 'Format the three changed files');
+call('Explore', 'Find every mention of banana');
 send('SubagentStart', taste); send('SubagentStart', wash); send('SubagentStart', guest);
 await sleep(900);
 tool(taste, 'Bash', { command: 'npm test', description: 'Run tests' }); tool(wash, 'Bash', { command: 'npx prettier --write src', description: 'Format changed files' });

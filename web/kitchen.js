@@ -9,7 +9,7 @@ const ROLES = [
   { id: 'backend-cook', name: 'Grill Cook', tier: 'sonnet' },
   { id: 'line-cook', name: 'Line Cook', tier: 'sonnet' },
   { id: 'taster', name: 'Taster', tier: 'sonnet' },
-  { id: 'inspector', name: 'Inspector', tier: 'sonnet' },
+  { id: 'inspector', name: 'Inspector', tier: 'opus' },
   { id: 'prep-cook', name: 'Prep Cook', tier: 'haiku' },
   { id: 'runner', name: 'Runner', tier: 'haiku' },
   { id: 'dishwasher', name: 'Dishwasher', tier: 'haiku' },
@@ -207,11 +207,12 @@ function chefPlan(s, first) {
   const atPass = face => ({ go: CHEF_SPOT, face });
   chef.tier = 'fable';
   if (c.status === 'waiting') {
+    release(chef);
     chef.setPlan('wait', [atPass('down'), { emote: '?', secs: 60 }, { act: 'wave' }]);
     if (!customer.emote) customer.say('!', 3);
   } else if (c.status === 'working') {
     const kind = c.kind || 'think';
-    if (kind === 'delegate') chef.setPlan('shout:' + c.activity, [atPass('up'), { emote: '!', secs: 1.4 }, { act: 'shout' }]);
+    if (kind === 'delegate') { release(chef); chef.setPlan('shout:' + c.activity, [atPass('up'), { emote: '!', secs: 1.4 }, { act: 'shout' }]); }
     else if (kind === 'read' || kind === 'search') workPlan(chef, 'head-chef', kind);
     else if (kind === 'web') workPlan(chef, 'head-chef', 'read');
     else if (kind === 'run') { const sp = claimSpot(chef, 'stove'); chef.setPlan('work:stove', [{ go: sp, face: 'up' }, { act: 'pan', at: [sp[0], 2] }]); }
@@ -253,7 +254,7 @@ function applyState(s) {
       if (!first) e.say('!', 1.2);
     }
     e.label = c.role === 'stagiaire' && c.agentType ? c.agentType : ROLE[c.role].name;
-    e.tier = ROLE[c.role].tier;
+    e.tier = c.tier || ROLE[c.role].tier;
     workPlan(e, c.role, c.kind || 'think');
   }
   for (const [id, e] of byCook) {
@@ -351,7 +352,7 @@ function drawDynamic(time) {
   const cooks = (live && live.cooks) || [];
   cooks.slice(0, 11).forEach((c, i) => {
     const x = MAP.rail.x * T + 3 + i * 11, done = c.status !== 'working';
-    R(ctx, x, T + 4, 8, 10, INK); R(ctx, x + 1, T + 5, 6, 8, done ? '#c9bfa6' : '#fff8ea'); R(ctx, x + 1, T + 5, 6, 2, TIER_COLOR[(ROLE[c.role] || ROLE.stagiaire).tier]);
+    R(ctx, x, T + 4, 8, 10, INK); R(ctx, x + 1, T + 5, 6, 8, done ? '#c9bfa6' : '#fff8ea'); R(ctx, x + 1, T + 5, 6, 2, TIER_COLOR[c.tier || (ROLE[c.role] || ROLE.stagiaire).tier]);
     if (!done) { R(ctx, x + 2, T + 9, 4, 1, '#8a96a1'); R(ctx, x + 2, T + 11, 3, 1, '#8a96a1'); }
   });
   for (const p of plates) drawPlate(ctx, p.x * T + 4, MAP.pass.y * T + 2, p.food);
@@ -458,7 +459,7 @@ function renderPanels(s) {
   $('tickets').innerHTML = chefRow + cooks.slice(0, 14).map(c => {
     const r = ROLE[c.role] || ROLE.stagiaire, name = c.role === 'stagiaire' && c.agentType ? c.agentType : r.name;
     const line = c.status === 'working' ? (c.activity || 'Getting started') : c.status === 'failed' ? 'Sent back' : 'Plated';
-    return `<li class="${c.status}"><i style="background:${TIER_COLOR[r.tier]}"></i><b>${esc(name)}</b><em>${esc(c.ticket || '')}</em><span>${esc(line)}</span></li>`;
+    return `<li class="${c.status}"><i style="background:${TIER_COLOR[c.tier || r.tier]}" title="${esc(TIER_LABEL[c.tier || r.tier] || '')}"></i><b>${esc(name)}</b><em>${esc(c.ticket || '')}</em><span>${esc(line)}</span></li>`;
   }).join('') || '<li class="muted">No tickets on the rail</li>';
 
   // tab
