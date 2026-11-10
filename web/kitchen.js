@@ -5,15 +5,16 @@
 const ROLES = [
   { id: 'head-chef', name: 'Head Chef', tier: 'fable' },
   { id: 'sous-chef', name: 'Sous Chef', tier: 'opus' },
-  { id: 'frontend-cook', name: 'Pastry Chef', tier: 'sonnet' },
-  { id: 'backend-cook', name: 'Grill Cook', tier: 'sonnet' },
-  { id: 'line-cook', name: 'Line Cook', tier: 'sonnet' },
-  { id: 'taster', name: 'Taster', tier: 'sonnet' },
+  { id: 'chef-de-partie', name: 'Senior Cook', tier: 'opus' },
+  { id: 'frontend-cook', name: 'Pastry Chef', tier: 'opus' },
+  { id: 'backend-cook', name: 'Grill Cook', tier: 'opus' },
+  { id: 'line-cook', name: 'Line Cook', tier: 'opus' },
+  { id: 'taster', name: 'Taster', tier: 'opus' },
   { id: 'inspector', name: 'Inspector', tier: 'opus' },
-  { id: 'prep-cook', name: 'Prep Cook', tier: 'haiku' },
-  { id: 'runner', name: 'Runner', tier: 'haiku' },
-  { id: 'dishwasher', name: 'Dishwasher', tier: 'haiku' },
-  { id: 'scribe', name: 'Menu Scribe', tier: 'haiku' },
+  { id: 'prep-cook', name: 'Prep Cook', tier: 'opus' },
+  { id: 'runner', name: 'Runner', tier: 'opus' },
+  { id: 'dishwasher', name: 'Dishwasher', tier: 'opus' },
+  { id: 'scribe', name: 'Menu Scribe', tier: 'opus' },
   { id: 'stagiaire', name: 'Stagiaire', tier: 'guest' },
 ];
 const ROLE = Object.fromEntries(ROLES.map(r => [r.id, r]));
@@ -24,30 +25,31 @@ const TIER_COLOR = { fable: '#b77fd0', opus: '#f08a63', sonnet: '#5cc7c7', haiku
 const LOC = {
   shelf: { act: 'read', spots: [[4, 3], [5, 3], [4, 4], [5, 4]] },
   pantry: { act: 'rummage', spots: [[2, 3], [3, 3], [1, 3], [2, 4], [3, 4]] },
-  sink: { act: 'wash', spots: [[7, 3], [8, 3]] },
-  board: { act: 'chop', spots: [[9, 3], [10, 3]] },
-  stove: { act: 'pan', spots: [[11, 3], [12, 3]] },
-  oven: { act: 'bake', spots: [[13, 3]] },
-  grill: { act: 'grill', spots: [[14, 3], [15, 3]] },
-  pastry: { act: 'pipe', spots: [[16, 3], [17, 3]] },
+  sink: { act: 'wash', spots: [[7, 3], [8, 3], [7, 4], [8, 4]] },
+  board: { act: 'chop', spots: [[9, 3], [10, 3], [9, 4], [10, 4]] },
+  stove: { act: 'pan', spots: [[11, 3], [12, 3], [11, 4], [12, 4]] },
+  oven: { act: 'bake', spots: [[13, 3], [13, 4]] },
+  grill: { act: 'grill', spots: [[14, 3], [15, 3], [14, 4], [15, 4]] },
+  pastry: { act: 'pipe', spots: [[16, 3], [17, 3], [16, 4], [17, 4]] },
   menu: { act: 'chalk', spots: [[21, 2], [20, 2], [22, 2]] },
   desk: { act: 'plan', spots: [[1, 8], [2, 8]] },
   pot: { act: 'taste', spots: [[9, 5], [10, 5]], face: 'down' },
+  bowl: { act: 'whisk', spots: [[12, 5], [13, 5], [14, 5]], face: 'down' },
   spuds: { act: 'peel', spots: [[15, 7], [14, 7], [16, 7]] },
 };
 const STATION = {
   'prep-cook': 'board', 'backend-cook': 'grill', 'frontend-cook': 'pastry', 'line-cook': 'stove', dishwasher: 'sink',
-  taster: 'pot', scribe: 'menu', 'sous-chef': 'desk', runner: 'pantry', stagiaire: 'spuds', inspector: 'patrol',
+  taster: 'pot', scribe: 'menu', 'sous-chef': 'desk', 'chef-de-partie': 'bowl', runner: 'pantry', stagiaire: 'spuds', inspector: 'patrol',
 };
 // Where each monkey waits between tickets: most on the break rug, a few dozing near their post.
 const HOME = {
   'frontend-cook': [20, 5], 'backend-cook': [22, 5], 'line-cook': [20, 7], 'prep-cook': [22, 7],
   runner: [21, 6], dishwasher: [19, 6], scribe: [23, 7],
-  'sous-chef': [3, 8], taster: [7, 6], inspector: [18, 8], stagiaire: [17, 6],
+  'sous-chef': [3, 8], 'chef-de-partie': [5, 6], taster: [7, 6], inspector: [18, 8], stagiaire: [17, 6],
 };
 const DOOR = [0, 3], CHEF_SPOT = [11, 9];
 const PLATE_SLOTS = [9, 14, 7, 16, 5, 18, 3, 20, 8, 15, 6, 17, 4, 19, 10, 13];
-const ARMS = new Set(['chop', 'pan', 'grill', 'pipe', 'wash', 'chalk', 'peel', 'rummage', 'place', 'ring', 'wave', 'plate', 'shout', 'bake', 'taste']);
+const ARMS = new Set(['chop', 'pan', 'grill', 'pipe', 'wash', 'chalk', 'peel', 'rummage', 'place', 'ring', 'wave', 'plate', 'shout', 'bake', 'taste', 'whisk']);
 const SPEED = 62; // world pixels per second
 
 function locFor(role, kind) {
@@ -62,6 +64,65 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const rnd = (a, b) => a + Math.random() * (b - a);
 const pick = a => a[Math.floor(Math.random() * a.length)];
+
+// ---------- show more / show less ----------
+// makeClamp(el, lines, key) turns a text element into one that is cut to `lines` lines, with a real
+// button after it that appears only when the text actually overflows. The open/closed state lives in
+// clampOpen under `key`, so it survives re-renders; c.set(text) changes the text, c.fit() re-measures.
+const clampOpen = new Set(), clamps = new Set();
+function makeClamp(el, lines, key) {
+  el.classList.add('clamp-text'); el.style.setProperty('--lines', lines);
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'clamp-btn'; btn.hidden = true;
+  el.after(btn);
+  const c = {
+    el, btn, key, text: null, over: false, dirty: true,
+    set(v) {
+      v = v == null ? '' : String(v);
+      if (v === c.text) return;
+      c.text = v; el.textContent = v;
+      if (!v) { c.over = false; c.dirty = false; el.classList.remove('expanded'); btn.hidden = true; return; }
+      c.fit();
+    },
+    fit() {
+      if (!el.clientWidth) { c.dirty = true; return; } // hidden right now: fitted again when it shows
+      c.dirty = false;
+      const open = clampOpen.has(c.key), top = el.scrollTop;
+      el.classList.remove('expanded');
+      c.over = el.scrollHeight > el.clientHeight + 1;
+      const exp = c.over && open;
+      el.classList.toggle('expanded', exp);
+      if (exp) el.scrollTop = top;
+      btn.hidden = !c.over;
+      btn.textContent = exp ? 'Show less' : 'Show more';
+      btn.setAttribute('aria-expanded', exp);
+    },
+  };
+  btn.addEventListener('click', ev => { ev.stopPropagation(); if (clampOpen.has(c.key)) clampOpen.delete(c.key); else clampOpen.add(c.key); c.fit(); });
+  btn.addEventListener('keydown', ev => ev.stopPropagation()); // Enter/Space on the button must not toggle the card around it
+  clamps.add(c);
+  return c;
+}
+function pruneClamps() { for (const c of clamps) if (!c.el.isConnected) clamps.delete(c); }
+window.addEventListener('resize', () => { pruneClamps(); for (const c of clamps) if (c.text) c.fit(); });
+
+// Keeps a list of keyed rows patched in place (no rebuild, so scroll positions and open states survive).
+// make(item, key) returns { el, clamp? }; rows are moved only when out of place.
+function patchList(box, items, keyOf, make) {
+  const m = box._rows || (box._rows = new Map()), seen = new Set();
+  let ref = box.firstElementChild;
+  for (const it of items) {
+    let k = keyOf(it);
+    for (let n = 1; seen.has(k); n++) k = keyOf(it) + '#' + n;
+    seen.add(k);
+    let rec = m.get(k);
+    if (!rec) { rec = make(it, k); m.set(k, rec); }
+    if (rec.el === ref) ref = ref.nextElementSibling; else box.insertBefore(rec.el, ref);
+  }
+  for (const [k, rec] of m) if (!seen.has(k)) { rec.el.remove(); m.delete(k); if (rec.clamp) { clamps.delete(rec.clamp); clampOpen.delete(rec.clamp.key); } }
+  fitDirty(box);
+}
+function fitDirty(box) { if (box._rows) for (const r of box._rows.values()) if (r.clamp && r.clamp.dirty) r.clamp.fit(); }
 
 // ---------- walking ----------
 
@@ -143,7 +204,9 @@ function release(e) { if (e.claim && claims.get(e.claim) === e) claims.delete(e.
 function claimSpot(e, name) {
   release(e);
   for (const sp of LOC[name].spots) { const k = sp.join(); if (!claims.has(k)) { claims.set(k, e); e.claim = k; return sp; } }
-  return LOC[name].spots[0];
+  const L = LOC[name]; // every spot taken: spread the overflow instead of stacking on one tile
+  L.over = ((L.over || 0) + 1) % L.spots.length;
+  return L.spots[L.over];
 }
 
 function resetWorld() {
@@ -186,7 +249,9 @@ function workPlan(e, role, kind) {
     e.setPlan(intent, steps, true);
   } else {
     const L = LOC[name], sp = claimSpot(e, name), face = L.face || 'up';
-    e.setPlan(intent, [{ set: { carry: null } }, { go: sp, face }, { act: L.act, at: [sp[0], sp[1] + (face === 'up' ? -1 : 1)] }]);
+    // facing up at a back-wall station the furniture is on row 2, whichever row we stand on (the menu board is on the wall, row 1)
+    const at = face === 'up' ? [sp[0], name === 'menu' ? sp[1] - 1 : 2] : [sp[0], sp[1] + 1];
+    e.setPlan(intent, [{ set: { carry: null } }, { go: sp, face }, { act: L.act, at }]);
   }
 }
 
@@ -242,6 +307,7 @@ function applyState(s) {
     if (!first) { plates = []; customerPlate = false; customer.say('!', 2); }
   }
   chefPlan(s, first);
+  chef.task = (s.chef && s.chef.activity) || '';
 
   for (const c of cooks) {
     if (c.status !== 'working') continue;
@@ -253,8 +319,9 @@ function applyState(s) {
       e.cook = c.id; byCook.set(c.id, e);
       if (!first) e.say('!', 1.2);
     }
-    e.label = c.role === 'stagiaire' && c.agentType ? c.agentType : ROLE[c.role].name;
-    e.tier = c.tier || ROLE[c.role].tier;
+    e.label = cookName(c);
+    e.task = c.activity || '';
+    e.tier = c.tier || (ROLE[c.role] || ROLE.stagiaire).tier;
     workPlan(e, c.role, c.kind || 'think');
   }
   for (const [id, e] of byCook) {
@@ -305,6 +372,7 @@ function effects(e, dt) {
     case 'wash': e.fx = .16; spawn(cx + rnd(-5, 5), cy + 2, rnd(-8, 8), rnd(-22, -10), .9, pick(['#b7e2f6', '#fff']), 0, pick([1, 2])); break;
     case 'chalk': e.fx = .22; chalk = Math.min(1, chalk + .012); spawn(cx + rnd(-8, 8), T + 12, rnd(-4, 4), rnd(8, 16), .5, '#e8f0e4'); break;
     case 'rummage': e.fx = .22; spawn(cx + rnd(-4, 4), cy + 10, rnd(-40, 40), rnd(-50, -30), .6, pick(JAR), 190, 2); break;
+    case 'whisk': e.fx = .18; spawn(cx + rnd(-4, 4), cy + 2, rnd(-10, 10), rnd(-30, -16), .6, pick(['#fff', '#ffe27a', '#fff3b0']), 20, pick([1, 2])); break;
     case 'plate': e.fx = .4; spawn(cx + rnd(-4, 4), cy, rnd(-6, 6), rnd(-18, -8), .6, pick(['#ffe27a', '#fff']), 0); break;
     case 'ring': e.fx = .08; spawn(cx + rnd(-2, 2), cy, rnd(-40, 40), rnd(-50, -15), .6, pick(['#ffe27a', '#fff', '#e7c94a']), 80); break;
     default: e.fx = .5;
@@ -379,6 +447,8 @@ function drawCarry(e, x, y) {
   else if (e.carry === 'clipboard') drawClipboard(ctx, x + 2, y - 2);
 }
 
+let labelsTasks = true;
+try { labelsTasks = localStorage.getItem('mk-labels') !== 'names'; } catch (_) {}
 const tags = new Map();
 function updateTags() {
   const seen = new Set();
@@ -388,7 +458,9 @@ function updateTags() {
     seen.add(e);
     let el = tags.get(e);
     if (!el) { el = document.createElement('div'); el.className = 'tag'; $('overlay').appendChild(el); tags.set(e, el); }
-    if (el.textContent !== e.label) el.textContent = e.label;
+    if (!el.firstChild) { el.innerHTML = '<div class="tag-name"></div><div class="tag-task"></div>'; }
+    setText(el.firstChild, e.label);
+    setText(el.lastChild, labelsTasks && e.task ? e.task : '');
     el.style.borderColor = TIER_COLOR[e.tier] || '#fff';
     el.style.left = ((e.x + 8) / W * 100) + '%';
     el.style.top = ((e.y + 17) / H * 100) + '%';
@@ -412,6 +484,7 @@ function frame(now) {
   for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / p.max * 2); R(ctx, Math.round(p.x), Math.round(p.y), p.size, p.size, p.c); }
   ctx.globalAlpha = 1;
   updateTags();
+  updateHover();
   dialogTick(dt);
   requestAnimationFrame(frame);
 }
@@ -419,26 +492,167 @@ function frame(now) {
 // ---------- text box, side panels ----------
 
 const dialog = { queue: [], text: '', shown: 0, hold: 0, lastKey: null };
-function dialogReset() { dialog.queue = []; dialog.text = ''; dialog.shown = 0; dialog.hold = 0; dialog.lastKey = null; $('dialog-text').textContent = ''; }
+const dialogClamp = makeClamp($('dialog-text'), 3, 'dialog');
+function dialogReset() { dialog.queue = []; dialog.text = ''; dialog.shown = 0; dialog.hold = 0; dialog.lastKey = null; clampOpen.delete(dialogClamp.key); dialogClamp.set(''); }
 function dialogPush(text) { dialog.queue.push(text); if (dialog.queue.length > 3) dialog.queue.splice(0, dialog.queue.length - 3); }
 function dialogTick(dt) {
   if (dialog.shown < dialog.text.length) {
     dialog.shown = Math.min(dialog.text.length, dialog.shown + dt * 60);
-    $('dialog-text').textContent = dialog.text.slice(0, Math.floor(dialog.shown));
+    dialogClamp.set(dialog.text.slice(0, Math.floor(dialog.shown)));
   } else if ((dialog.hold -= dt) <= 0 && dialog.queue.length) {
     dialog.text = dialog.queue.shift(); dialog.shown = 0; dialog.hold = 1.3;
+    clampOpen.delete(dialogClamp.key); dialogClamp.key = 'dialog:' + dialog.text; // each message starts collapsed
   }
 }
 
 const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n || 0);
 const money = n => '$' + (n >= 100 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : n.toFixed(3));
 
+function setText(el, v) { v = v == null ? '' : String(v); if (el.textContent !== v) el.textContent = v; }
+const cookName = c => c.role === 'stagiaire' && c.agentType ? c.agentType : (ROLE[c.role] || ROLE.stagiaire).name;
+const clockTime = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+// ---------- "On the line" panel: entries keyed by cook id, patched in place ----------
+
+let clockSkew = 0;
+const lineEnts = new Map(), lineOpen = new Set();
+const nowMs = () => Date.now() + clockSkew;
+function mmss(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), sec = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+
+function makeEnt(id) {
+  const el = document.createElement('div');
+  el.className = 'ent';
+  el.innerHTML = '<div class="ent-main" role="button" tabindex="0" aria-expanded="false">' +
+    '<div class="ent-head"><i class="ent-dot"></i><b class="ent-name"></b><span class="chip"></span><span class="ent-st"></span><span class="ent-el"></span><span class="ent-n"></span><span class="ent-caret">▸</span></div>' +
+    '<div class="ent-ticket"></div><div class="ent-act"></div></div>' +
+    '<div class="ent-body" hidden>' +
+    '<div class="sec sec-prompt"><h3>Ticket</h3><pre class="ent-prompt"></pre></div>' +
+    '<div class="sec sec-log"><h3>Recent steps</h3><ol class="ent-log"></ol></div>' +
+    '<div class="sec sec-report"><h3>Report</h3><pre class="ent-report"></pre></div></div>';
+  const q = c => el.querySelector('.' + c);
+  const ent = { id, el, main: q('ent-main'), dot: q('ent-dot'), name: q('ent-name'), chip: q('chip'), st: q('ent-st'), elapsed: q('ent-el'), n: q('ent-n'),
+    ticket: q('ent-ticket'), act: q('ent-act'), body: q('ent-body'), prompt: q('ent-prompt'), log: q('ent-log'), report: q('ent-report'),
+    secPrompt: q('sec-prompt'), secLog: q('sec-log'), secReport: q('sec-report'), logSig: null, logInit: false, d: null };
+  ent.cTicket = makeClamp(ent.ticket, 3, id + ':ticket');
+  ent.cPrompt = makeClamp(ent.prompt, 6, id + ':prompt');
+  ent.cReport = makeClamp(ent.report, 6, id + ':report');
+  const toggle = () => {
+    if (String(getSelection()).length) return; // finishing a text selection is not a click
+    if (lineOpen.has(id)) lineOpen.delete(id); else lineOpen.add(id);
+    paintEnt(ent);
+  };
+  ent.main.addEventListener('click', toggle);
+  ent.main.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  return ent;
+}
+
+function makeStep(l, key) {
+  const li = document.createElement('li');
+  li.innerHTML = '<time></time><div class="step-main"><div class="step-text"></div></div>';
+  li.firstChild.textContent = clockTime(l.t);
+  const clamp = makeClamp(li.querySelector('.step-text'), 2, key);
+  clamp.set(l.text);
+  return { el: li, clamp };
+}
+
+function paintEnt(ent) {
+  const d = ent.d, open = lineOpen.has(ent.id);
+  ent.el.className = 'ent ' + d.state + (open ? ' open' : '');
+  ent.main.setAttribute('aria-expanded', open);
+  ent.body.hidden = !open;
+  if (!open) { ent.logInit = false; return; }
+  ent.secPrompt.hidden = !d.prompt; ent.secReport.hidden = !d.report;
+  ent.cPrompt.set(d.prompt); ent.cReport.set(d.report);
+  const log = d.log || [], sig = JSON.stringify(log);
+  ent.secLog.hidden = !log.length;
+  if (sig !== ent.logSig) {
+    const ol = ent.log, stick = !ent.logInit || ol.scrollHeight - ol.scrollTop - ol.clientHeight < 6;
+    patchList(ol, log, l => l.t + '|' + l.text, (l, k) => makeStep(l, ent.id + ':step:' + k));
+    ent.logSig = sig;
+    if (stick) ol.scrollTop = ol.scrollHeight;
+  } else if (!ent.logInit) ent.log.scrollTop = ent.log.scrollHeight;
+  for (const c of [ent.cPrompt, ent.cReport]) if (c.dirty) c.fit(); // sections that were hidden when their text arrived
+  fitDirty(ent.log);
+  ent.logInit = true;
+}
+
+function tickEnts() {
+  for (const ent of lineEnts.values()) {
+    const d = ent.d;
+    if (d && d.start) setText(ent.elapsed, mmss((d.end || nowMs()) - d.start)); else if (d) setText(ent.elapsed, '');
+  }
+}
+setInterval(tickEnts, 1000);
+
+function renderLine(s) {
+  const want = [];
+  const c = s.chef;
+  if (c && c.status && c.status !== 'idle') {
+    want.push({ id: 'chef', name: 'Head Chef', tier: 'fable', state: 'working', status: c.status, ticket: '', act: c.activity || 'Thinking', log: s.chefLog || [], prompt: '', report: '', start: 0, end: 0, steps: null });
+  }
+  const cooks = (s.cooks || []).slice();
+  const fin = x => x.endedAt || x.startedAt || 0;
+  const working = cooks.filter(x => x.status === 'working').sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  const done = cooks.filter(x => x.status !== 'working').sort((a, b) => fin(b) - fin(a));
+  for (const x of [...working, ...done].slice(0, 40)) {
+    const r = ROLE[x.role] || ROLE.stagiaire, st = x.status === 'working' ? 'working' : x.status === 'failed' ? 'failed' : 'done';
+    want.push({
+      id: x.id, name: cookName(x), tier: x.tier || r.tier, state: st, status: st,
+      ticket: x.ticket || '', act: st === 'working' ? (x.activity || 'Getting started') : st === 'failed' ? 'Sent back' : 'Plated',
+      log: x.log || [], prompt: x.prompt || '', report: x.report || '', start: x.startedAt || 0, end: st === 'working' ? 0 : (x.endedAt || 0), steps: x.tools,
+    });
+  }
+  $('line-empty').hidden = want.length > 0;
+  const box = $('line'), ids = new Set(want.map(w => w.id));
+  for (const [id, ent] of lineEnts) if (!ids.has(id)) { ent.el.remove(); lineEnts.delete(id); lineOpen.delete(id); }
+  let ref = box.firstElementChild;
+  for (const w of want) {
+    let ent = lineEnts.get(w.id);
+    if (!ent) { ent = makeEnt(w.id); lineEnts.set(w.id, ent); }
+    ent.d = w;
+    if (ent.el === ref) ref = ref.nextElementSibling; else box.insertBefore(ent.el, ref); // moves only what is out of place, so scroll positions survive
+    const col = TIER_COLOR[w.tier] || TIER_COLOR.other;
+    ent.dot.style.background = col;
+    setText(ent.name, w.name);
+    setText(ent.chip, TIER_LABEL[w.tier] || w.tier); ent.chip.style.background = col;
+    setText(ent.st, w.status);
+    setText(ent.n, w.steps == null ? '' : `${w.steps} step${w.steps === 1 ? '' : 's'}`);
+    ent.cTicket.set(w.ticket); setText(ent.act, w.act);
+    paintEnt(ent);
+  }
+  tickEnts();
+}
+
+// ---------- order box, label toggle ----------
+
+let orderOpen = false;
+function fitOrder() {
+  const box = $('order'), t = $('order-text');
+  box.classList.remove('open');
+  const long = t.scrollHeight > t.clientHeight + 1;
+  box.classList.toggle('long', long);
+  box.classList.toggle('open', long && orderOpen);
+  $('order-more').textContent = long ? (orderOpen ? '▴ less' : '▾ more') : '';
+}
+$('order').addEventListener('click', () => { if (String(getSelection()).length) return; orderOpen = !orderOpen; fitOrder(); });
+window.addEventListener('resize', fitOrder);
+function paintLabelsBtn() { $('labels-toggle').textContent = labelsTasks ? 'Labels: names + tasks' : 'Labels: names'; $('labels-toggle').setAttribute('aria-pressed', labelsTasks); }
+$('labels-toggle').addEventListener('click', () => {
+  labelsTasks = !labelsTasks;
+  try { localStorage.setItem('mk-labels', labelsTasks ? 'tasks' : 'names'); } catch (_) {}
+  paintLabelsBtn();
+});
+paintLabelsBtn();
+
 function renderPanels(s) {
   live = s;
+  if (typeof s.now === 'number') clockSkew = s.now - Date.now();
   const o = s.order || {};
   $('order').className = 'order ' + (o.status || '');
   $('order-text').textContent = o.text || 'No order yet. Send one from Claude Code.';
-  $('order-text').title = o.text || '';
   $('dropped').textContent = s.dropped || 0;
 
   // text box: narrate new feed lines
@@ -452,15 +666,8 @@ function renderPanels(s) {
     dialog.lastKey = keyOf(feed[feed.length - 1]);
   }
 
-  // tickets
-  const cooks = [...(s.cooks || [])].sort((a, b) => (a.status === 'working' ? 0 : 1) - (b.status === 'working' ? 0 : 1) || b.startedAt - a.startedAt);
-  const chefRow = s.chef && s.chef.status !== 'idle'
-    ? `<li class="working"><i style="background:${TIER_COLOR.fable}"></i><b>Head Chef</b><span>${esc(s.chef.activity || 'Thinking')}</span></li>` : '';
-  $('tickets').innerHTML = chefRow + cooks.slice(0, 14).map(c => {
-    const r = ROLE[c.role] || ROLE.stagiaire, name = c.role === 'stagiaire' && c.agentType ? c.agentType : r.name;
-    const line = c.status === 'working' ? (c.activity || 'Getting started') : c.status === 'failed' ? 'Sent back' : 'Plated';
-    return `<li class="${c.status}"><i style="background:${TIER_COLOR[c.tier || r.tier]}" title="${esc(TIER_LABEL[c.tier || r.tier] || '')}"></i><b>${esc(name)}</b><em>${esc(c.ticket || '')}</em><span>${esc(line)}</span></li>`;
-  }).join('') || '<li class="muted">No tickets on the rail</li>';
+  renderLine(s);
+  fitOrder();
 
   // tab
   const u = s.usage;
@@ -478,11 +685,121 @@ function renderPanels(s) {
     $('saving').textContent = '';
   }
 
-  $('feed').innerHTML = feed.slice().reverse().map(f => {
-    const t = new Date(f.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    return `<li class="${f.fail ? 'fail' : ''}"><time>${t}</time><b>${esc((ROLE[f.who] || ROLE.stagiaire).name)}</b> ${esc(f.text)}</li>`;
-  }).join('');
+  patchList($('feed'), feed.slice().reverse(), f => f.t + '|' + f.text, (f, k) => {
+    const li = document.createElement('li');
+    li.className = f.fail ? 'fail' : '';
+    li.innerHTML = `<time>${esc(clockTime(f.t))}</time><div class="feed-text"><div><b>${esc((ROLE[f.who] || ROLE.stagiaire).name)}</b> ${esc(f.text)}</div></div>`;
+    const clamp = makeClamp(li.lastChild, 2, 'feed:' + k);
+    clamp.fit();
+    return { el: li, clamp };
+  });
+  if (clamps.size > 300) pruneClamps();
 }
+
+// ---------- hover card ----------
+
+const JOB = {
+  'head-chef': 'Runs the pass: splits the order into tickets, hands them out, checks every plate.',
+  'sous-chef': 'Plans big changes, makes design calls, finds the root cause of bugs.',
+  'chef-de-partie': 'Takes the hard build tickets in any layer.',
+  inspector: 'Reviews finished changes for bugs and security problems.',
+  'frontend-cook': 'Front-end work: components, pages, styling.',
+  'backend-cook': 'Back-end work: APIs, data, jobs.',
+  'line-cook': 'Other build work: scripts, config, tooling.',
+  taster: 'Runs the tests and checks, reports pass or fail with evidence.',
+  'prep-cook': 'Finds and reads code, returns quoted evidence.',
+  runner: 'Looks things up on the web and in docs.',
+  scribe: 'Writes docs for code that already exists.',
+  dishwasher: 'Mechanical cleanup: formatting, lint fixes, listed renames.',
+  stagiaire: 'A guest agent from outside the brigade.',
+};
+const hc = { el: $('hovercard'), ent: null };
+hc.el.innerHTML = '<div class="hc-head"><b class="hc-name"></b><span class="chip hc-chip"></span><span class="hc-model"></span></div>' +
+  '<div class="hc-status"></div><div class="hc-ticket"></div><div class="hc-act"></div><div class="hc-job"></div><ol class="hc-log"><li></li><li></li><li></li></ol>';
+{
+  const q = c => hc.el.querySelector('.' + c);
+  Object.assign(hc, { name: q('hc-name'), chip: q('hc-chip'), model: q('hc-model'), status: q('hc-status'), ticket: q('hc-ticket'), act: q('hc-act'), job: q('hc-job'), logEl: q('hc-log') });
+}
+
+function hoverInfo(e) {
+  const o = live && live.order, ch = (live && live.chef) || { status: 'idle' };
+  if (e === customer) {
+    const text = (o && o.text) || '';
+    return { name: 'You', status: !o ? 'No order yet' : o.status === 'served' ? 'Served' : 'Waiting on the order', ticket: text.length > 200 ? text.slice(0, 200).trimEnd() + '…' : text };
+  }
+  if (e === chef) {
+    return { name: 'Head Chef', tier: 'fable', status: ch.status === 'waiting' ? 'Waiting on you' : ch.status === 'working' ? 'Working' : 'Idle',
+      act: ch.status === 'idle' ? '' : (ch.activity || ''), job: ch.status === 'idle' ? JOB['head-chef'] : '', log: ((live && live.chefLog) || []).slice(-3) };
+  }
+  const c = e.cook && live && (live.cooks || []).find(x => x.id === e.cook);
+  if (c) {
+    const r = ROLE[c.role] || ROLE.stagiaire, bits = [c.status];
+    if (c.startedAt) bits.push(mmss((c.status === 'working' ? nowMs() : (c.endedAt || nowMs())) - c.startedAt));
+    if (c.tools != null) bits.push(`${c.tools} step${c.tools === 1 ? '' : 's'}`);
+    return { name: cookName(c), tier: c.tier || r.tier, model: c.model || '', status: bits.join(' · '), ticket: c.ticket || '',
+      act: c.status === 'working' ? (c.activity || 'Getting started') : c.status === 'failed' ? 'Sent back' : 'Plated', log: (c.log || []).slice(-3) };
+  }
+  const r = ROLE[e.role] || ROLE.stagiaire;
+  return { name: r.name, tier: r.tier, status: 'On break', job: JOB[e.role] || '' };
+}
+
+function paintHover(e) {
+  const d = hoverInfo(e), col = TIER_COLOR[d.tier] || TIER_COLOR.other;
+  setText(hc.name, d.name);
+  hc.chip.hidden = !d.tier; setText(hc.chip, d.tier ? (TIER_LABEL[d.tier] || d.tier) : ''); hc.chip.style.background = col;
+  setText(hc.model, d.model); setText(hc.status, d.status); setText(hc.ticket, d.ticket); setText(hc.act, d.act); setText(hc.job, d.job);
+  hc.logEl.querySelectorAll('li').forEach((li, i) => { const l = d.log && d.log[i]; li.hidden = !l; setText(li, l ? l.text : ''); });
+}
+
+function placeHover(e) {
+  const sw = canvas.clientWidth, sh = canvas.clientHeight, s = sw / W, w = hc.el.offsetWidth, h = hc.el.offsetHeight, gap = 6;
+  let x = (e.x + 17) * s + gap, y = (e.y - 8) * s - h - gap; // above and to the right of the sprite
+  if (x + w > sw) x = (e.x - 1) * s - w - gap;               // no room on the right: flip to the left
+  if (y < 0) y = (e.y + 16) * s + gap;                        // no room above: drop below the feet
+  hc.el.style.left = Math.round(Math.max(0, Math.min(x, sw - w))) + 'px';
+  hc.el.style.top = Math.round(Math.max(0, Math.min(y, sh - h))) + 'px';
+}
+
+function setHover(e) {
+  if (e === hc.ent) return;
+  hc.ent = e; hc.el.hidden = !e;
+  canvas.style.cursor = e ? 'pointer' : '';
+  if (e) { paintHover(e); placeHover(e); }
+}
+function updateHover() { // every frame while shown: follow the monkey, patch the text
+  const e = hc.ent;
+  if (!e) return;
+  if (e.hidden || !monkeys.includes(e)) { setHover(null); return; }
+  paintHover(e); placeHover(e);
+}
+
+function monkeyAt(ev) {
+  const r = canvas.getBoundingClientRect(), wx = (ev.clientX - r.left) / r.width * W, wy = (ev.clientY - r.top) / r.height * H;
+  let best = null;
+  for (const e of monkeys) {
+    if (e.hidden || wx < e.x - 1 || wx > e.x + 17 || wy < e.y - 8 || wy > e.y + 16) continue;
+    if (!best || e.y > best.y) best = e; // the lower one is drawn in front
+  }
+  return best;
+}
+
+function openLineCard(e) {
+  const id = e === chef ? 'chef' : e.cook, ent = id && lineEnts.get(id);
+  if (!ent || !ent.d) return;
+  lineOpen.add(id); paintEnt(ent);
+  ent.el.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}
+
+let ptype = 'mouse';
+canvas.addEventListener('pointerdown', ev => { ptype = ev.pointerType; });
+canvas.addEventListener('pointermove', ev => { if (ev.pointerType === 'touch') return; ptype = ev.pointerType; setHover(monkeyAt(ev)); });
+canvas.addEventListener('pointerleave', ev => { if (ev.pointerType !== 'touch') setHover(null); });
+canvas.addEventListener('click', ev => {
+  const e = monkeyAt(ev);
+  if (ptype === 'touch') { if (e && e === hc.ent) openLineCard(e); else setHover(e); return; } // first tap shows the card, a second tap opens the ticket
+  if (e) openLineCard(e);
+});
+document.addEventListener('pointerdown', ev => { if (ev.pointerType === 'touch' && ev.target !== canvas) setHover(null); });
 
 // ---------- session picker + live connection ----------
 
@@ -494,7 +811,7 @@ function onSnapshot(all) {
   sel.hidden = all.sessions.length < 2;
   sel.innerHTML = '<option value="">Latest session</option>' + all.sessions.map(x =>
     `<option value="${esc(x.id)}"${x.id === watching ? ' selected' : ''}>${esc(x.project)} · ${esc(x.id.slice(0, 6))}</option>`).join('');
-  applyState(all.sessions.find(x => x.id === watching) || all.sessions[0] || {});
+  applyState(Object.assign({}, all.sessions.find(x => x.id === watching) || all.sessions[0] || {}, { now: all.now }));
 }
 function connect() {
   const es = new EventSource('/events');

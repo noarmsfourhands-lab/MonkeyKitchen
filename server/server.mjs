@@ -18,9 +18,9 @@ const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const ENDED_KEEP_MS = 30 * 60 * 1000;
 const STALE_MS = Number(process.env.MONKEY_KITCHEN_STALE_MS) || 15 * 60 * 1000;
 
-const BRIGADE = new Set(['sous-chef', 'frontend-cook', 'backend-cook', 'line-cook', 'taster', 'inspector', 'prep-cook', 'runner', 'dishwasher', 'scribe']);
+const BRIGADE = new Set(['sous-chef', 'chef-de-partie', 'frontend-cook', 'backend-cook', 'line-cook', 'taster', 'inspector', 'prep-cook', 'runner', 'dishwasher', 'scribe']);
 const ROLE_NAME = {
-  'head-chef': 'Head Chef', 'sous-chef': 'Sous Chef', 'frontend-cook': 'Pastry Chef', 'backend-cook': 'Grill Cook',
+  'head-chef': 'Head Chef', 'sous-chef': 'Sous Chef', 'chef-de-partie': 'Senior Cook', 'frontend-cook': 'Pastry Chef', 'backend-cook': 'Grill Cook',
   'line-cook': 'Line Cook', taster: 'Taster', inspector: 'Health Inspector', 'prep-cook': 'Prep Cook',
   runner: 'Runner', dishwasher: 'Dishwasher', scribe: 'Menu Scribe', stagiaire: 'Stagiaire',
 };
@@ -34,6 +34,10 @@ const seen = new Set(); // recent _mk.ids, to drop duplicate deliveries
 let lastEventAt = Date.now();
 
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// Long text (orders, tickets, reports): keeps line breaks, trims runs of spaces.
+const clipLong = (s, n) => { s = String(s ?? '').replace(/[^\S\n]+/g, ' ').replace(/ ?\n[ \n]*/g, '\n').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// Append a step to a cook's or the chef's log (newest last, 20 kept).
+const step = (log, t, kind, text) => { log.push({ t, kind, text }); if (log.length > 20) log.splice(0, log.length - 20); };
 const base = p => String(p || '').split(/[\\/]/).filter(Boolean).pop() || '';
 const isAgentTool = t => t === 'Agent' || t === 'Task';
 // Keep a Map or Set at or under max entries, dropping the oldest.
@@ -49,13 +53,13 @@ function describe(tool, input = {}) {
   switch (tool) {
     case 'Read': return ['read', `Reading ${base(input.file_path)}`];
     case 'Edit': case 'Write': case 'NotebookEdit': return ['write', `Writing ${base(input.file_path || input.notebook_path)}`];
-    case 'Grep': return ['search', `Searching for "${clip(input.pattern, 24)}"`];
-    case 'Glob': return ['search', `Looking for ${clip(input.pattern, 28)}`];
-    case 'Bash': case 'PowerShell': return ['run', `Running: ${clip(input.description || input.command, 36)}`];
+    case 'Grep': return ['search', `Searching for "${clip(input.pattern, 100)}"`];
+    case 'Glob': return ['search', `Looking for ${clip(input.pattern, 100)}`];
+    case 'Bash': case 'PowerShell': return ['run', `Running: ${clip(input.description || input.command, 160)}`];
     case 'WebFetch': { try { return ['web', `Fetching ${new URL(input.url).host}`]; } catch { return ['web', 'Fetching a page']; } }
-    case 'WebSearch': return ['web', `Looking up "${clip(input.query, 26)}"`];
+    case 'WebSearch': return ['web', `Looking up "${clip(input.query, 120)}"`];
     case 'Agent': case 'Task': return ['delegate', `Calling the ${ROLE_NAME[roleOf(input.subagent_type)]}`];
-    default: return ['tool', typeof tool === 'string' && tool.startsWith('mcp__') ? `Using ${clip(tool.split('__').pop(), 28)}` : `Using ${clip(tool, 28)}`];
+    default: return ['tool', typeof tool === 'string' && tool.startsWith('mcp__') ? `Using ${clip(tool.split('__').pop(), 60)}` : `Using ${clip(tool, 60)}`];
   }
 }
 
@@ -64,7 +68,7 @@ function getSession(p) {
   if (!s) {
     s = {
       id: p.session_id, cwd: '', project: 'session', fixedProject: false, startedAt: Date.now(), lastEventAt: Date.now(), mainAt: Date.now(),
-      order: null, chef: { status: 'idle', activity: '' }, cooks: new Map(), pending: [], feed: [],
+      order: null, chef: { status: 'idle', activity: '' }, chefLog: [], cooks: new Map(), pending: [], feed: [],
       calls: new Map(), known: new Map(), early: new Map(), ended: new Set(), promptAt: 0, lastStopAt: 0, endTimer: null,
       dropped: 0, lastDrop: null, usage: null, meter: null, scans: new Map(),
     };
@@ -101,17 +105,17 @@ function getCook(s, p, create) {
   let c = s.cooks.get(p.agent_id);
   if (c || !create || s.ended.has(p.agent_id)) return c || null;
   c = {
-    id: p.agent_id, agentType: p.agent_type || '', role: roleOf(p.agent_type), ticket: '', activity: '', kind: 'think', status: 'working',
+    id: p.agent_id, agentType: p.agent_type || '', role: roleOf(p.agent_type), ticket: '', prompt: '', report: '', log: [], activity: '', kind: 'think', status: 'working',
     startedAt: Date.now(), endedAt: 0, lastEventAt: Date.now(), tools: 0, model: '', tier: '', guessCall: null,
   };
   const known = s.known.get(c.id);
   if (known) {
     // The Agent call's own response already named this cook.
-    c.ticket = known.ticket; c.model = known.model; s.known.delete(c.id);
+    c.ticket = known.ticket; c.prompt = known.prompt; c.model = known.model; s.known.delete(c.id);
   } else {
     // Guess the ticket the Head Chef wrote: oldest unclaimed call for this role. PostToolUse corrects it.
     const i = s.pending.findIndex(t => roleOf(t.type) === c.role);
-    if (i >= 0) { const t = s.pending.splice(i, 1)[0]; c.ticket = t.ticket; c.guessCall = t.id; }
+    if (i >= 0) { const t = s.pending.splice(i, 1)[0]; c.ticket = t.ticket; c.prompt = t.prompt; c.guessCall = t.id; }
   }
   const a = s.usage?.agents?.[c.id];
   if (a) { c.tier = a.tier; c.model ||= a.model; }
@@ -142,9 +146,9 @@ function applyPair(s, id, call, agentId, resolved) {
   s.pending = s.pending.filter(t => t.id !== id);
   const c = s.cooks.get(agentId);
   // Whoever was handed this ticket by guesswork was wrong; its own PostToolUse will give it the right one.
-  for (const o of s.cooks.values()) if (o !== c && o.guessCall === id) { o.ticket = ''; o.guessCall = null; }
-  if (!c) { s.known.set(agentId, { ticket: call.ticket, model }); trim(s.known, 200); return; }
-  c.ticket = call.ticket; c.guessCall = null;
+  for (const o of s.cooks.values()) if (o !== c && o.guessCall === id) { o.ticket = ''; o.prompt = ''; o.guessCall = null; }
+  if (!c) { s.known.set(agentId, { ticket: call.ticket, prompt: call.prompt, model }); trim(s.known, 200); return; }
+  c.ticket = call.ticket; c.prompt = call.prompt; c.guessCall = null;
   if (model) c.model = model;
 }
 
@@ -179,33 +183,36 @@ function handle(p) {
       clearTimeout(s.endTimer);
       // New order: clear finished tickets off the rail.
       for (const [id, k] of s.cooks) if (k.status !== 'working') s.cooks.delete(id);
+      s.chefLog = [];
       s.promptAt = Math.max(s.promptAt, at);
       // The Stop of this short turn may have been delivered first: then the order is already served.
       const served = at < s.lastStopAt;
-      s.order = { text: clip(p.prompt, 400), startedAt: Date.now(), status: served ? 'served' : 'cooking' };
+      s.order = { text: clipLong(p.prompt, 4000), startedAt: Date.now(), status: served ? 'served' : 'cooking' };
       if (!served) s.chef = { status: 'working', activity: 'Reading the order', kind: 'think' };
-      say(s, 'head-chef', `new order: ${clip(p.prompt, 90)}`);
+      say(s, 'head-chef', `new order: ${clip(p.prompt, 240)}`);
       break;
     }
 
     case 'PreToolUse': {
       const [kind, what] = describe(p.tool_name, p.tool_input);
       if (c) {
-        c.activity = what; c.kind = kind; c.tools++;
+        c.activity = what; c.kind = kind; c.tools++; step(c.log, at, kind, what);
       } else if (at >= s.lastStopAt) {
         s.chef = { status: 'working', activity: what, kind };
+        step(s.chefLog, at, kind, what);
         if (s.order && s.order.status !== 'cooking') s.order.status = 'cooking';
       }
       if (isAgentTool(p.tool_name)) {
         const type = p.tool_input?.subagent_type || '';
-        const ticket = clip(p.tool_input?.description || p.tool_input?.prompt, 80);
+        const prompt = clipLong(p.tool_input?.prompt, 4000);
+        const ticket = clip(p.tool_input?.description || p.tool_input?.prompt, 200);
         const id = p.tool_use_id || null;
-        if (id) { s.calls.set(id, { type, ticket, model: p.tool_input?.model || '' }); trim(s.calls, 200); }
+        if (id) { s.calls.set(id, { type, ticket, prompt, model: p.tool_input?.model || '' }); trim(s.calls, 200); }
         // The cook may already have clocked in if events arrived out of order.
         const early = id && s.early.get(id);
         if (early) { s.early.delete(id); applyPair(s, id, s.calls.get(id), early.agentId, early.model); } else {
           const waiting = [...s.cooks.values()].find(k => !k.ticket && k.status === 'working' && k.role === roleOf(type) && Date.now() - k.startedAt < 5000);
-          if (waiting) { waiting.ticket = ticket; waiting.guessCall = id; } else s.pending.push({ id, type, ticket, at: Date.now() });
+          if (waiting) { waiting.ticket = ticket; waiting.prompt = prompt; waiting.guessCall = id; } else s.pending.push({ id, type, ticket, prompt, at: Date.now() });
         }
         say(s, who, `→ ${ROLE_NAME[roleOf(type)]}: ${ticket}`);
       }
@@ -234,7 +241,7 @@ function handle(p) {
 
     case 'SubagentStop':
       finish(s, c, 'done');
-      c.activity = '';
+      c.activity = ''; c.report = clipLong(p.last_assistant_message, 4000);
       say(s, c.role, `order up${c.tools ? ` (${c.tools} steps)` : ''}`);
       break;
 
@@ -310,8 +317,8 @@ function sweep() {
 
 function snapshot() {
   const list = [...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).slice(0, 12).map(s => ({
-    id: s.id, project: s.project, order: s.order, chef: s.chef,
-    cooks: [...s.cooks.values()], feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage: s.usage,
+    id: s.id, project: s.project, order: s.order, chef: s.chef, chefLog: s.chefLog,
+    cooks: [...s.cooks.values()].map(({ guessCall, ...c }) => c), feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage: s.usage,
   }));
   return { now: Date.now(), sessions: list };
 }

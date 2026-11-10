@@ -6,37 +6,43 @@ No API key and no dependencies. It needs Node 18 or newer.
 
 ## What it does
 
-- **Routes work to the cheapest capable model.** At session start the plugin gives the Head Chef a short set of rules: which cook gets which kind of ticket, when to do the work itself, and when to escalate.
+- **Routes work to the right cook, many at once.** At session start the plugin gives the Head Chef a short set of rules: which cook gets which kind of ticket, how to keep many tickets cooking in parallel, when to do the work itself, and when to escalate.
 - **Shows the kitchen.** Hooks forward session events to a small local server, and the page at http://localhost:4747 animates whoever is working.
 - **Keeps a tab.** Token counts per model tier are read from the session transcripts and priced at API list prices, next to an estimate of the same tokens at the Head Chef's price.
 
 ## The brigade
 
-| Station | Agent | Model | Job |
-|---|---|---|---|
-| Head Chef | your main session | whatever you run (Fable recommended) | Splits the order, delegates, checks the plate |
-| Sous Chef | `sous-chef` | Opus | Design decisions, plans, stubborn bugs (can run commands to reproduce, never edits) |
-| Pastry Chef | `frontend-cook` | Sonnet | Front-end work |
-| Grill Cook | `backend-cook` | Sonnet | Back-end work |
-| Line Cook | `line-cook` | Sonnet | Other build work: scripts, config, tooling |
-| Taster | `taster` | Sonnet | Runs tests and checks |
-| Health Inspector | `inspector` | Opus | Independent review of a finished change for bugs, security, and fit to the goal (read-only) |
-| Prep Cook | `prep-cook` | Haiku | Locates and quotes code: paths, signatures, call sites, log errors (read-only). Not for explaining behavior across files |
-| Runner | `runner` | Haiku | Web and docs lookups |
-| Dishwasher | `dishwasher` | Haiku | Mechanical cleanup |
-| Menu Scribe | `scribe` | Haiku | Docs for existing code |
-| Stagiaire | any other agent | varies | Where agents from outside the brigade show up |
+| Station | Agent | Model | Effort | Job |
+|---|---|---|---|---|
+| Head Chef | your main session | whatever you run (Fable recommended) | yours | Splits the order, keeps many tickets cooking at once, checks the plate |
+| Sous Chef | `sous-chef` | Opus | xhigh | Design decisions, plans, root cause of bugs (can run commands to reproduce, never edits) |
+| Senior Cook | `chef-de-partie` | Opus | high | Hard build work in any layer: subtle logic, concurrency, wide refactors, cross-layer features |
+| Health Inspector | `inspector` | Opus | high | Independent review of a finished change for bugs, security, and fit to the goal (never edits) |
+| Pastry Chef | `frontend-cook` | Opus | medium | Front-end work |
+| Grill Cook | `backend-cook` | Opus | medium | Back-end work |
+| Line Cook | `line-cook` | Opus | medium | Other build work: scripts, config, tooling |
+| Taster | `taster` | Opus | medium | Runs tests and checks, writes tests when asked |
+| Prep Cook | `prep-cook` | Opus | low | Finds and reads code, with quoted evidence (never edits) |
+| Runner | `runner` | Opus | low | Web and docs lookups |
+| Menu Scribe | `scribe` | Opus | low | Docs for existing code |
+| Dishwasher | `dishwasher` | Opus | low | Mechanical cleanup |
+| Stagiaire | any other agent | varies | varies | Where agents from outside the brigade show up |
 
-Cooks cannot spawn other cooks, so the Head Chef is the only one handing out tickets. The Head Chef can run any cook on a stronger model for a single ticket (the Agent tool's `model` parameter), and the kitchen shows the tier a cook actually ran on.
+Cooks cannot spawn other cooks, so the Head Chef is the only one handing out tickets. It can run several cooks of the same kind at once, and can change a cook's effort or model for a single ticket (the Agent tool's `effort` and `model` parameters). The kitchen shows the tier a cook actually ran on.
+
+Every cook runs on Opus. What varies is the effort level: low for lookups and mechanical work, medium for well-specified building, high and above for hard building, review and planning. The brigade is tuned for accuracy and speed first, and saves usage by keeping work out of the Head Chef's context and by not over-thinking easy tickets. To change a cook, edit the `model:` and `effort:` lines in its `agents/*.md` file.
 
 ## How the Head Chef works
 
 - Does one- or two-step jobs itself, and keeps any job where the hard part is deciding.
-- Sends prep cooks to find and quote code, and checks one quoted line before trusting a summary.
+- Fans out: splits the order into every independent ticket it has and sends them together, several cooks of one kind included.
+- Keeps the line moving: checks each piece as it comes back while the rest still cook, and never waits when something else could start.
+- Never gives two cooks the same file or a shared one, and fixes the contract first for work that crosses front and back end.
+- Picks the effort by difficulty up front: low for lookups, medium for well-specified building, the Senior Cook for hard work, Fable for the single hardest ticket.
 - Writes each ticket in full: the goal, the files it may touch, the limits, and the check that proves it done.
-- Sends independent tickets together, and never gives two cooks the same file.
+- Sends prep cooks to every area at once, and checks one quoted line before trusting a summary.
 - Reproduces a bug before fixing it, and gives a builder a cause, not just a symptom.
-- Reruns a failed ticket once on Opus, sends design and understanding problems to the Sous Chef, and takes over if Opus fails.
+- Reruns a failed ticket once with more effort or with the Senior Cook, and takes over itself if that fails.
 - Runs the Taster after build work, and the Health Inspector on risky or large changes.
 - Treats a cook's report as a claim until the check output backs it up.
 - Skips the kitchen for conversation, quick questions, and anything you ask it to do directly.

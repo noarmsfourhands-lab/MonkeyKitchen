@@ -13,6 +13,7 @@
   <div class="order" id="order">
     <span class="order-label">Order</span>
     <span class="order-text" id="order-text">No order yet. Send one from Claude Code.</span>
+    <span class="order-more" id="order-more"></span>
   </div>
   <select id="session-pick" title="Which Claude Code session to watch" hidden></select>
   <span class="conn" id="conn" title="Connection to the kitchen server"></span>
@@ -23,17 +24,19 @@
     <div class="scene">
       <canvas id="game" width="960" height="544"></canvas>
       <div class="overlay" id="overlay">
-        <div class="hud">PLATES DROPPED <b id="dropped">0</b></div>
+        <div class="hud"><div>PLATES DROPPED <b id="dropped">0</b></div><button type="button" class="hud-btn" id="labels-toggle" title="Show or hide the task line under each name tag">Labels: names + tasks</button></div>
       </div>
+      <div class="hovercard" id="hovercard" hidden></div>
       <div class="closed" id="closed" hidden><div>KITCHEN CLOSED<small>The server isn't answering. It restarts on your next prompt.</small></div></div>
     </div>
     <div class="dialog"><p id="dialog-text"></p><span class="more">▼</span></div>
   </section>
 
   <aside class="side">
-    <section class="panel">
-      <h2>Tickets</h2>
-      <ul id="tickets" class="tickets"><li class="muted">No tickets on the rail</li></ul>
+    <section class="panel line-panel">
+      <h2>On the line</h2>
+      <p class="muted line-empty" id="line-empty">Nothing on the line. Click a card to see its ticket, steps and report.</p>
+      <div id="line" class="line"></div>
     </section>
     <section class="panel">
       <h2>Tab so far</h2>

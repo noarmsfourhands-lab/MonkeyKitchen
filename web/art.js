@@ -178,6 +178,7 @@ function drawBackground(ctx) {
 const STYLE = {
   'head-chef': { fur: '#6b4226', hat: 'tall', band: '#e7c94a', moustache: true },
   'sous-chef': { fur: '#7a4b2a', hat: 'toque', band: '#d9542b' },
+  'chef-de-partie': { fur: '#4f3320', hat: 'toque', band: '#8e44ad' },
   'line-cook': { fur: '#8b5a2b', hat: 'toque', band: '#aab6bb' },
   'frontend-cook': { fur: '#b9794a', hat: 'beret', c: '#f08db0' },
   'backend-cook': { fur: '#5e3d24', hat: 'bandana', c: '#d33f3f' },
