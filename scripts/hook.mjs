@@ -4,74 +4,190 @@
 // that is closed must not get in the way of the session.
 //
 //   node hook.mjs            relay only
-//   node hook.mjs --context  relay, then print the brigade rules for SessionStart
+//   node hook.mjs --context  relay, then print the brigade rules for SessionStart;
+//                            at startup also replaces a running server from an older version or a deleted folder
 
-const TS = Date.now(); // the event time; async hooks can reach the server out of order
+// The event time is when this process started, before module loading: async hooks can reach the server out of order.
+const TS = Math.round(performance.timeOrigin) || Date.now();
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.MONKEY_KITCHEN_PORT) || 4747;
 const BUDGET_MS = 2800; // reaching or starting the server may never hold the session up longer than this
+const LOCK = path.join(os.tmpdir(), `monkey-kitchen-${PORT}.lock`);
+const LOCK_MS = 20000;
+const CONTEXT = process.argv.includes('--context');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+let t0 = Date.now();
+const left = () => BUDGET_MS - (Date.now() - t0);
 
-function post(body, timeout) {
-  return new Promise(resolve => {
-    const req = http.request({
-      host: '127.0.0.1', port: PORT, path: '/hook', method: 'POST', timeout, agent: false,
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
-    }, res => { res.resume(); resolve('ok'); }); // any HTTP answer, 4xx/5xx included, means the server is there
-    req.on('error', e => resolve(e.code === 'ECONNREFUSED' ? 'refused' : 'fail'));
-    req.on('timeout', () => { req.destroy(); resolve('fail'); });
-    req.end(body);
-  });
+function version() {
+  try { return String(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version || ''); } catch { return ''; }
 }
 
+// Only what the server reads goes over the wire: tool responses and Write/Edit inputs can hold whole files.
+const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+function val(v, n) {
+  if (typeof v === 'string') return cut(v, n);
+  if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
+  if (v && typeof v === 'object' && typeof v.level === 'string') return { level: cut(v.level, 40) };
+  return undefined;
+}
+function pick(src, fields) {
+  const out = {};
+  for (const [k, n] of Object.entries(fields)) { const v = val(src[k], n); if (v !== undefined) out[k] = v; }
+  return out;
+}
+const TOP = {
+  session_id: 200, transcript_path: 4096, cwd: 4096, hook_event_name: 100, agent_id: 200, agent_type: 200, agent_transcript_path: 4096,
+  tool_name: 200, tool_use_id: 200, source: 100, model: 200, effort: 40, prompt: 4000, notification_type: 100, message: 500, last_assistant_message: 4000,
+};
+const INPUT = { file_path: 1000, notebook_path: 1000, pattern: 500, command: 1000, description: 500, url: 2000, query: 500, subagent_type: 200, prompt: 4000, model: 200, effort: 40 };
+const RESPONSE = { agentId: 200, status: 100, resolvedModel: 200 };
+function slim(p) {
+  const out = pick(typeof p.prompt === 'string' ? { ...p, prompt: stripReminders(p.prompt) } : p, TOP);
+  if (p.tool_input && typeof p.tool_input === 'object') out.tool_input = pick(p.tool_input, INPUT);
+  // The server reads a response only for Agent calls, so only theirs is worth parsing when it comes as a string.
+  let r = p.tool_response;
+  if (typeof r === 'string') {
+    r = (p.tool_name === 'Agent' || p.tool_name === 'Task') && r.length < 5e7 && r.trimStart().startsWith('{') ? (() => { try { return JSON.parse(r); } catch { return null; } })() : null;
+  }
+  if (r && typeof r === 'object' && !Array.isArray(r)) { const o = pick(r, RESPONSE); if (Object.keys(o).length) out.tool_response = o; }
+  return out;
+}
+
+// Claude Code can put <system-reminder> blocks before the user's own words; drop them so the clip keeps the real text.
+const REMINDER = /^<system-reminder(?:\s[^>]*)?>[\s\S]*?<\/system-reminder>/;
+function stripReminders(t) { t = t.trimStart(); let m; while ((m = REMINDER.exec(t))) t = t.slice(m[0].length).trimStart(); return t; }
+
+// Reads at most `max` characters of the answer: enough to recognise who is talking.
+function request(method, urlPath, body, timeout, max = 1e5) {
+  return new Promise(resolve => {
+    const req = http.request({
+      host: '127.0.0.1', port: PORT, path: urlPath, method, timeout, agent: false,
+      headers: body == null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, res => {
+      let data = '';
+      res.setEncoding('utf8');
+      const done = () => resolve({ r: 'ok', status: res.statusCode, kitchen: res.headers['x-monkey-kitchen'] === '1', data });
+      res.on('data', d => { data += d; if (data.length >= max) { done(); res.destroy(); } });
+      res.on('end', done);
+      res.on('error', done);
+    });
+    req.on('error', e => resolve({ r: e.code === 'ECONNREFUSED' ? 'refused' : 'fail' }));
+    req.on('timeout', () => { req.destroy(); resolve({ r: 'fail' }); });
+    req.end(body ?? undefined);
+  });
+}
+const wait = () => Math.max(50, Math.min(600, left()));
+const post = async body => { const a = await request('POST', '/hook', body, wait()); return a.r !== 'ok' ? a.r : a.kitchen ? 'ok' : 'foreign'; };
+
+// Who owns the port, asked without sending the payload: 'kitchen' (with its /health info), 'legacy' (a kitchen from
+// before /health, which cannot be told to leave), 'foreign' (another program), 'refused' (nobody) or 'fail' (no answer).
+async function probe() {
+  const h = await request('GET', '/health', null, wait());
+  if (h.r !== 'ok') return { kind: h.r };
+  let info = null;
+  try { info = JSON.parse(h.data); } catch { /* not a kitchen's health */ }
+  if (h.kitchen || (h.status === 200 && info?.app === 'monkey-kitchen')) return { kind: 'kitchen', info };
+  const st = await request('GET', '/state', null, wait(), 200);
+  if (st.r === 'ok' && st.status === 200 && /^\{"now":\d+,"sessions":\[/.test(st.data)) return { kind: 'legacy' };
+  return { kind: 'foreign' };
+}
+
+// One hook starts the server; the rest wait for it. A lock older than LOCK_MS is from a start that died.
+function takeLock() {
+  for (let i = 0; i < 2; i++) {
+    try { fs.closeSync(fs.openSync(LOCK, 'wx')); return true; } catch (e) {
+      if (e.code !== 'EEXIST') return true; // no usable temp folder: start without a lock
+      try { if (Date.now() - fs.statSync(LOCK).mtimeMs < LOCK_MS) return false; fs.unlinkSync(LOCK); } catch { /* raced: retry once */ }
+    }
+  }
+  return false;
+}
+const dropLock = () => { try { fs.unlinkSync(LOCK); } catch { /* gone */ } };
+
 function startServer() {
+  // cwd is the plugin root: on Windows a process locks its working folder, and the user's project must stay free.
   const child = spawn(process.execPath, [path.join(ROOT, 'server', 'server.mjs')], {
-    detached: true, stdio: 'ignore', windowsHide: true,
+    cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true,
   });
   child.on('error', () => {});
   child.unref();
 }
 
-async function relay(body) {
-  const t0 = Date.now();
-  const left = () => BUDGET_MS - (Date.now() - t0);
+// Dotted versions compared numerically: "0.10.0" is newer than "0.9.3".
+function olderVersion(a, b) {
+  const x = String(a ?? '').split('.').map(n => parseInt(n, 10) || 0), y = String(b ?? '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0);
+  return false;
+}
+// Only an older release, or one whose folder is gone, gives way: two live installs must not keep killing each other.
+const outdated = info => olderVersion(info?.version, version()) || (typeof info?.root === 'string' && !fs.existsSync(info.root));
+
+// Ask a running kitchen to leave and wait until the port is free; false when it stays.
+async function retire() {
+  const bye = await request('POST', '/shutdown', '{}', wait());
+  if (bye.r !== 'ok' || bye.status >= 300) return false;
+  while (left() > 600) { if ((await request('GET', '/health', null, 300)).r === 'refused') return true; await sleep(100); }
+  return false;
+}
+
+// The payload is posted only to a port that has identified itself as a kitchen. Returns 'ok', 'legacy',
+// 'foreign', 'refused' or 'fail'.
+async function relay(body, source) {
+  t0 = Date.now();
+  let p = await probe();
+  if (p.kind === 'kitchen' && CONTEXT && source === 'startup' && outdated(p.info) && await retire()) p = { kind: 'refused' };
+  if (p.kind === 'kitchen') return post(body);
   // Only a refused connection means no server is running; a timeout or reset must not spawn another.
-  if ((await post(body, Math.min(600, left()))) !== 'refused') return;
-  startServer();
+  if (p.kind !== 'refused') return p.kind;
+  const mine = takeLock();
+  if (mine) startServer();
+  let r = 'refused';
   while (left() > 250) {
     await sleep(200);
-    if ((await post(body, Math.max(50, Math.min(600, left())))) === 'ok') return;
+    const q = await probe();
+    if (q.kind === 'kitchen') { r = await post(body); if (r === 'ok') { if (mine) dropLock(); return r; } }
+    else if (q.kind !== 'refused' && q.kind !== 'fail') return q.kind;
   }
+  return r;
 }
 
 setTimeout(() => process.exit(0), BUDGET_MS + 1500).unref(); // last resort if stdin or the network hangs
 
-let out = '';
+let out = '', status = '';
 try {
   let raw = '';
+  process.stdin.setEncoding('utf8'); // a character split across chunks must not be mangled
   for await (const chunk of process.stdin) raw += chunk;
 
   let payload = null;
   try { payload = JSON.parse(raw); } catch { /* not JSON: relay nothing */ }
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-    payload._mk = { id: crypto.randomUUID(), ts: TS, projectDir: process.env.CLAUDE_PROJECT_DIR || null };
-    await relay(JSON.stringify(payload));
+    const body = slim(payload);
+    body._mk = { id: crypto.randomUUID(), ts: TS, projectDir: process.env.CLAUDE_PROJECT_DIR || null };
+    status = await relay(JSON.stringify(body), payload.source);
   }
 
-  if (process.argv.includes('--context') && process.env.MONKEY_KITCHEN_ROUTING !== 'off') {
+  if (CONTEXT && process.env.MONKEY_KITCHEN_ROUTING !== 'off') {
     const rules = fs.readFileSync(path.join(ROOT, 'brigade', 'head-chef.md'), 'utf8');
+    const where = status === 'foreign'
+      ? `The kitchen view is off: port ${PORT} is used by another program. Set MONKEY_KITCHEN_PORT to a free port.`
+      : status === 'legacy'
+        ? `An older Monkey Kitchen server is still running on port ${PORT}. Stop it once (close the process listening on that port); the next session starts the new one.`
+        : `The live kitchen view is at http://localhost:${PORT}.`;
     out = JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: `${rules}\nThe live kitchen view is at http://localhost:${PORT}.`,
+        additionalContext: `${rules}\n${where}`,
       },
     });
   }

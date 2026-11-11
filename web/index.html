@@ -12,30 +12,29 @@
   <h1>MONKEY KITCHEN</h1>
   <div class="order" id="order">
     <span class="order-label">Order</span>
-    <span class="order-text" id="order-text">No order yet. Send one from Claude Code.</span>
-    <span class="order-more" id="order-more"></span>
+    <div class="order-body"><p class="order-text" id="order-text">No order yet. Send one from Claude Code.</p></div>
   </div>
-  <select id="session-pick" title="Which Claude Code session to watch" hidden></select>
-  <span class="conn" id="conn" title="Connection to the kitchen server"></span>
+  <label class="session" id="session-wrap" hidden><span class="session-label">Session</span><select id="session-pick" title="Which Claude Code session to watch"></select></label>
+  <span class="conn" id="conn" role="img" aria-label="Not connected yet" title="Connecting to the kitchen server"></span>
 </header>
 
 <main class="layout">
   <section class="screen">
-    <div class="scene">
-      <canvas id="game" width="960" height="544"></canvas>
+    <div class="scene" id="scene">
+      <canvas id="game" width="960" height="544" role="img" aria-label="Kitchen scene. Waiting for the kitchen server."></canvas>
       <div class="overlay" id="overlay">
         <div class="hud"><div>PLATES DROPPED <b id="dropped">0</b></div><button type="button" class="hud-btn" id="labels-toggle" title="Show or hide the task line under each name tag">Labels: names + tasks</button></div>
       </div>
       <div class="hovercard" id="hovercard" hidden></div>
-      <div class="closed" id="closed" hidden><div>KITCHEN CLOSED<small>The server isn't answering. It restarts on your next prompt.</small></div></div>
+      <div class="offline" id="offline" role="status" aria-live="polite"></div>
     </div>
-    <div class="dialog"><p id="dialog-text"></p><span class="more">▼</span></div>
+    <div class="dialog"><p id="dialog-text"></p></div>
   </section>
 
   <aside class="side">
     <section class="panel line-panel">
       <h2>On the line</h2>
-      <p class="muted line-empty" id="line-empty">Nothing on the line. Click a card to see its ticket, steps and report.</p>
+      <p class="muted line-empty" id="line-empty">Nothing on the line yet.</p>
       <div id="line" class="line"></div>
     </section>
     <section class="panel">

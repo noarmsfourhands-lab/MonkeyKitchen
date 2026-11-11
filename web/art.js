@@ -11,7 +11,7 @@ function R(ctx, x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
 // ---------- map ----------
 // Where things are, in tiles. Used by the drawing code and the walk grid.
 const MAP = {
-  door: { x: 0 }, pantry: { x: 1, w: 2 }, fridge: { x: 3 }, books: { x: 4, w: 2 },
+  pantry: { x: 1, w: 2 }, fridge: { x: 3 }, books: { x: 4, w: 2 },
   sink: { x: 7, w: 2 }, board: { x: 9, w: 2 }, stove: { x: 11, w: 2 }, oven: { x: 13 },
   grill: { x: 14, w: 2 }, pastry: { x: 16, w: 2 }, counterEnd: 18,
   island: { x: 8, w: 9, y: 6 }, pot: { x: 9 }, bowl: { x: 12 }, spuds: { x: 15 },
@@ -295,5 +295,19 @@ function drawPlate(ctx, x, y, food = '#e8792e') {
   R(ctx, x, y + 1, 8, 3, INK); R(ctx, x + 1, y, 6, 5, INK); R(ctx, x + 1, y + 1, 6, 3, '#fff'); R(ctx, x + 2, y + 1, 4, 2, food); R(ctx, x + 3, y + 1, 1, 1, '#fff3b0');
 }
 function drawCrate(ctx, x, y) { R(ctx, x, y, 8, 7, INK); R(ctx, x + 1, y + 1, 6, 5, '#b9854a'); R(ctx, x + 1, y + 3, 6, 1, '#7d4f27'); }
-function drawBook(ctx, x, y) { R(ctx, x, y, 7, 5, INK); R(ctx, x + 1, y + 1, 5, 3, '#d9534f'); R(ctx, x + 3, y + 1, 1, 3, '#fff8ea'); }
 function drawClipboard(ctx, x, y) { R(ctx, x, y, 6, 7, INK); R(ctx, x + 1, y + 1, 4, 5, '#fff8ea'); R(ctx, x + 2, y + 2, 2, 1, '#8a96a1'); R(ctx, x + 2, y + 4, 2, 1, '#8a96a1'); }
+
+// a 3x5 pixel font for small counts (the "+N" at the end of the ticket rail)
+const TINY = {
+  '+': ['...', '.#.', '###', '.#.', '...'], 0: ['###', '#.#', '#.#', '#.#', '###'], 1: ['.#.', '##.', '.#.', '.#.', '###'],
+  2: ['###', '..#', '###', '#..', '###'], 3: ['###', '..#', '.##', '..#', '###'], 4: ['#.#', '#.#', '###', '..#', '..#'],
+  5: ['###', '#..', '###', '..#', '###'], 6: ['###', '#..', '###', '#.#', '###'], 7: ['###', '..#', '.#.', '.#.', '.#.'],
+  8: ['###', '#.#', '###', '#.#', '###'], 9: ['###', '#.#', '###', '..#', '###'],
+};
+function drawTiny(ctx, x, y, str, c) {
+  for (const ch of String(str)) {
+    const g = TINY[ch];
+    if (g) for (let j = 0; j < 5; j++) for (let i = 0; i < 3; i++) if (g[j][i] === '#') R(ctx, x + i, y + j, 1, 1, c);
+    x += 4;
+  }
+}

@@ -1,8 +1,11 @@
 {
   "name": "monkey-kitchen",
   "displayName": "Monkey Kitchen",
-  "version": "0.1.0",
-  "description": "A brigade of monkey chefs for Claude Code: routes work to the cheapest capable model and shows the kitchen live at http://localhost:4747.",
+  "version": "0.2.0",
+  "description": "Your main session becomes Head Chef over eleven subagents on Opus or better: parallel tickets, effort matched to difficulty, checked results, and a live kitchen view at http://localhost:4747.",
+  "author": { "name": "noarmsfourhands-lab", "url": "https://github.com/noarmsfourhands-lab" },
+  "homepage": "https://github.com/noarmsfourhands-lab/MonkeyKitchen",
+  "repository": "https://github.com/noarmsfourhands-lab/MonkeyKitchen",
   "license": "MIT",
-  "keywords": ["subagents", "usage", "visualization", "workflow"]
+  "keywords": ["subagents", "parallel", "delegation", "visualization", "workflow"]
 }

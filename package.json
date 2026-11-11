@@ -1,6 +1,6 @@
 {
   "name": "monkey-kitchen",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A brigade of monkey chefs for Claude Code, with a live animated kitchen.",
@@ -8,6 +8,7 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server/server.mjs",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "test": "node --test test/*.test.mjs"
   }
 }

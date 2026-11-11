@@ -10,7 +10,7 @@
       { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.mjs\"", "async": true } ] }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.mjs\"", "async": true } ] }
+      { "matcher": "Agent|Task", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.mjs\"", "async": true } ] }
     ],
     "PostToolUseFailure": [
       { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.mjs\"", "async": true } ] }

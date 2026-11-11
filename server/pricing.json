@@ -1,9 +1,27 @@
 {
-  "note": "USD per million tokens, Anthropic API list prices as of 2026-11. Edit freely. input/output and the fable, opus and sonnet cacheRead values are published prices. ASSUMED, not confirmed: every cacheWrite value (1.25x input) and haiku cacheRead (0.1x input). Older models in a transcript are priced at their tier's current rate.",
-  "perMillionTokens": {
-    "fable":  { "input": 8.00, "output": 40.00, "cacheRead": 0.20, "cacheWrite": 10.00 },
-    "opus":   { "input": 4.00, "output": 20.00, "cacheRead": 0.20, "cacheWrite": 5.00 },
-    "sonnet": { "input": 2.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite": 2.50 },
-    "haiku":  { "input": 0.10, "output": 0.50,  "cacheRead": 0.01, "cacheWrite": 0.125 }
+  "note": "USD per million tokens, Anthropic API list prices as of 2026-11. Edit freely. A message is priced by its model id (longest matching prefix in models wins), else at its tier's current rate (tiers). LIST PRICES: every input and output value; cacheRead 0.20 for claude-fable-5-2, 1.00 for claude-fable-5, 0.20 for claude-opus-5-5 and 0.10 for claude-sonnet-5-5 (and the claude-mythos entries and tiers that copy them); the 2x fast multiplier for claude-fable-5-2 and claude-opus-5-5. ASSUMED, not confirmed: every cacheWrite5m (1.25x input) and cacheWrite1h (2x input) value, and every other cacheRead (0.1x input: claude-fable-5-1, claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-sonnet-5, claude-sonnet-4-6, claude-haiku-5-5, claude-haiku-4-5 and the haiku tier). NOT MODELLED: Haiku 5.5's higher rate for prompts over 100K tokens.",
+  "models": {
+    "claude-fable-5-2":  { "input": 8.00,  "output": 40.00, "cacheRead": 0.20, "cacheWrite5m": 10.00, "cacheWrite1h": 16.00, "fast": 2 },
+    "claude-fable-5-1":  { "input": 10.00, "output": 50.00, "cacheRead": 1.00, "cacheWrite5m": 12.50, "cacheWrite1h": 20.00 },
+    "claude-fable-5":    { "input": 10.00, "output": 50.00, "cacheRead": 1.00, "cacheWrite5m": 12.50, "cacheWrite1h": 20.00 },
+    "claude-mythos-5-2": { "input": 8.00,  "output": 40.00, "cacheRead": 0.20, "cacheWrite5m": 10.00, "cacheWrite1h": 16.00, "fast": 2 },
+    "claude-mythos-5-1": { "input": 10.00, "output": 50.00, "cacheRead": 1.00, "cacheWrite5m": 12.50, "cacheWrite1h": 20.00 },
+    "claude-mythos-5":   { "input": 10.00, "output": 50.00, "cacheRead": 1.00, "cacheWrite5m": 12.50, "cacheWrite1h": 20.00 },
+    "claude-opus-5-5":   { "input": 4.00,  "output": 20.00, "cacheRead": 0.20, "cacheWrite5m": 5.00,  "cacheWrite1h": 8.00, "fast": 2 },
+    "claude-opus-5":     { "input": 5.00,  "output": 25.00, "cacheRead": 0.50, "cacheWrite5m": 6.25,  "cacheWrite1h": 10.00 },
+    "claude-opus-4-8":   { "input": 5.00,  "output": 25.00, "cacheRead": 0.50, "cacheWrite5m": 6.25,  "cacheWrite1h": 10.00 },
+    "claude-opus-4-7":   { "input": 5.00,  "output": 25.00, "cacheRead": 0.50, "cacheWrite5m": 6.25,  "cacheWrite1h": 10.00 },
+    "claude-opus-4-6":   { "input": 5.00,  "output": 25.00, "cacheRead": 0.50, "cacheWrite5m": 6.25,  "cacheWrite1h": 10.00 },
+    "claude-sonnet-5-5": { "input": 2.00,  "output": 10.00, "cacheRead": 0.10, "cacheWrite5m": 2.50,  "cacheWrite1h": 4.00 },
+    "claude-sonnet-5":   { "input": 2.00,  "output": 10.00, "cacheRead": 0.20, "cacheWrite5m": 2.50,  "cacheWrite1h": 4.00 },
+    "claude-sonnet-4-6": { "input": 3.00,  "output": 15.00, "cacheRead": 0.30, "cacheWrite5m": 3.75,  "cacheWrite1h": 6.00 },
+    "claude-haiku-5-5":  { "input": 0.10,  "output": 0.50,  "cacheRead": 0.01, "cacheWrite5m": 0.125, "cacheWrite1h": 0.20 },
+    "claude-haiku-4-5":  { "input": 1.00,  "output": 5.00,  "cacheRead": 0.10, "cacheWrite5m": 1.25,  "cacheWrite1h": 2.00 }
+  },
+  "tiers": {
+    "fable":  { "input": 8.00, "output": 40.00, "cacheRead": 0.20, "cacheWrite5m": 10.00, "cacheWrite1h": 16.00, "fast": 2 },
+    "opus":   { "input": 4.00, "output": 20.00, "cacheRead": 0.20, "cacheWrite5m": 5.00,  "cacheWrite1h": 8.00, "fast": 2 },
+    "sonnet": { "input": 2.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite5m": 2.50,  "cacheWrite1h": 4.00 },
+    "haiku":  { "input": 0.10, "output": 0.50,  "cacheRead": 0.01, "cacheWrite5m": 0.125, "cacheWrite1h": 0.20 }
   }
 }

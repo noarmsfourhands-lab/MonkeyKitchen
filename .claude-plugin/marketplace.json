@@ -1,12 +1,13 @@
 {
   "name": "monkey-kitchen",
   "description": "Home of the Monkey Kitchen plugin for Claude Code.",
-  "owner": { "name": "Monkey Kitchen" },
+  "owner": { "name": "noarmsfourhands-lab" },
   "plugins": [
     {
       "name": "monkey-kitchen",
       "source": "./",
-      "description": "A brigade of monkey chefs for Claude Code, with a live animated kitchen and a usage tab."
+      "description": "Your main session becomes Head Chef over eleven subagents on Opus or better: parallel tickets, effort matched to difficulty, checked results, and a live kitchen view at http://localhost:4747.",
+      "homepage": "https://github.com/noarmsfourhands-lab/MonkeyKitchen"
     }
   ]
 }

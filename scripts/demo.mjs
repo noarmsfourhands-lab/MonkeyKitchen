@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Plays a scripted service through the real hook relay, so you can watch the
 // kitchen without spending any tokens:  npm run demo
-// It writes a fake transcript to the temp folder so the usage tab has numbers.
+// It writes a fake transcript to the temp folder so the "Tab so far" panel has numbers.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,6 +20,10 @@ const subDir = path.join(dir, session, 'subagents');
 fs.mkdirSync(subDir, { recursive: true });
 fs.writeFileSync(transcript, '');
 
+// Run inside Claude Code, the real project dir would rename the demo session; the demo kitchen is the banana stand.
+const HOOK_ENV = { ...process.env };
+delete HOOK_ENV.CLAUDE_PROJECT_DIR;
+
 let n = 0;
 function bill(file, model, input, output, cacheRead = 0, cacheWrite = 0) {
   const rec = { type: 'assistant', uuid: 'u' + n, message: { id: 'msg_demo_' + n++, model, usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite } } };
@@ -29,9 +33,12 @@ const agentFile = id => path.join(subDir, `agent-${id}.jsonl`);
 
 function send(event, extra = {}) {
   const payload = { session_id: session, transcript_path: transcript, cwd: path.join(os.homedir(), 'banana-stand'), hook_event_name: event, ...extra };
-  spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload) });
+  spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload), env: HOOK_ENV });
 }
 const cook = (id, type) => ({ agent_id: id, agent_type: 'monkey-kitchen:' + type });
+// Each cook's effort as its tool events report it: the brigade defaults from agents/*.md (the guest gets medium).
+const EFFORT = { 'prep-cook': 'low', runner: 'low', scribe: 'low', dishwasher: 'low', 'line-cook': 'medium', 'frontend-cook': 'medium', 'backend-cook': 'medium', taster: 'medium', 'chef-de-partie': 'high', inspector: 'high', 'sous-chef': 'xhigh' };
+const effort = who => ({ effort: { level: EFFORT[who.agent_type.split(':').pop()] || 'medium' } });
 const call = (type, description, prompt) => send('PreToolUse', { tool_name: 'Agent', tool_input: { subagent_type: 'monkey-kitchen:' + type, description, prompt } });
 const REPORT = {
   a1: 'The home page is src/app/page.tsx and API routes live under src/app/api/<name>/route.ts, each exporting async GET/POST handlers. There is already a health route to copy from.',
@@ -48,7 +55,7 @@ const REPORT = {
   a12: 'Cache decision confirmed: wrapped the lookup in a date-keyed memo with a one-hour expiry. Wrote it in src/lib/cache.ts and the route now reads from it.',
 };
 const stop = c => send('SubagentStop', { ...c, last_assistant_message: REPORT[c.agent_id] });
-const tool = (who, tool_name, tool_input) => send('PreToolUse', { ...who, tool_name, tool_input });
+const tool = (who, tool_name, tool_input) => send('PreToolUse', { ...who, ...effort(who), tool_name, tool_input });
 
 console.log('Playing a demo service. Watch http://localhost:' + (process.env.MONKEY_KITCHEN_PORT || 4747));
 
@@ -84,7 +91,7 @@ tool(be, 'Write', { file_path: 'src/app/api/banana/route.ts' }); tool(fe, 'Write
 await sleep(1600);
 tool(fe, 'Edit', { file_path: 'src/app/page.tsx' }); tool(be, 'Bash', { command: 'npx tsc --noEmit', description: 'Type check' });
 await sleep(1400);
-send('PostToolUseFailure', { ...be, tool_name: 'Bash', tool_input: { command: 'npx tsc --noEmit' } });
+send('PostToolUseFailure', { ...be, ...effort(be), tool_name: 'Bash', tool_input: { command: 'npx tsc --noEmit' } });
 tool(be, 'Edit', { file_path: 'src/app/api/banana/route.ts' });
 bill(agentFile('a3'), 'claude-opus-5-5', 22000, 3100, 30000); bill(agentFile('a4'), 'claude-opus-5-5', 19000, 2600, 24000);
 await sleep(1500);
