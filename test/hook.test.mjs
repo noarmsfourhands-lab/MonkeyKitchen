@@ -52,11 +52,14 @@ test('with --context: stdout is JSON whose additionalContext contains brigade/he
   assert.ok(await k.session(sid), 'payload also delivered');
 });
 
-test('with --context and MONKEY_KITCHEN_ROUTING=off: stdout is empty', async () => {
+test('with --context and MONKEY_KITCHEN_ROUTING=off: the rules are left out but the kitchen link is still given', async () => {
   const sid = 'hookoff-' + Date.now();
   const r = await runNode([HOOK, '--context'], { input: payload(sid, { hook_event_name: 'SessionStart' }), env: { MONKEY_KITCHEN_PORT: String(k.port), MONKEY_KITCHEN_ROUTING: 'off' } });
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(r.stdout, '');
+  const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+  assert.ok(!ctx.includes('Rules of the pass'), 'no routing rules');
+  assert.ok(ctx.includes('routing rules are switched off'), 'says routing is off');
+  assert.match(ctx, new RegExp(`The live kitchen view is at http://localhost:${k.port}/\\?k=[0-9a-f]{32}`), 'still carries the keyed link');
 });
 
 test('with invalid JSON on stdin: exit 0 and nothing is posted', async () => {

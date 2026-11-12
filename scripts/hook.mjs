@@ -17,8 +17,15 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveToken, pageKey, healthProof, sameToken } from '../server/token.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// The master token goes only to a server that has proved it holds the same one (see probe()); the browser link
+// carries the read-only page key derived from it.
+const TOKEN = (() => { try { return resolveToken(); } catch { return null; } })();
+const PAGE = pageKey(TOKEN);
+const FIRST_KEYED = '0.3.0'; // kitchens older than this have no keys: they get no token, and no payload
+let proven = false; // a server proved our key at some point in this run
 const PORT = Number(process.env.MONKEY_KITCHEN_PORT) || 4747;
 const BUDGET_MS = 2800; // reaching or starting the server may never hold the session up longer than this
 const LOCK = path.join(os.tmpdir(), `monkey-kitchen-${PORT}.lock`);
@@ -68,15 +75,17 @@ const REMINDER = /^<system-reminder(?:\s[^>]*)?>[\s\S]*?<\/system-reminder>/;
 function stripReminders(t) { t = t.trimStart(); let m; while ((m = REMINDER.exec(t))) t = t.slice(m[0].length).trimStart(); return t; }
 
 // Reads at most `max` characters of the answer: enough to recognise who is talking.
-function request(method, urlPath, body, timeout, max = 1e5) {
+// `withToken` adds the master token: only for a server that has just proved it holds it.
+function request(method, urlPath, body, timeout, max = 1e5, withToken = false) {
+  const headers = body == null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) };
+  if (withToken && TOKEN) headers['x-mk-token'] = TOKEN;
   return new Promise(resolve => {
     const req = http.request({
-      host: '127.0.0.1', port: PORT, path: urlPath, method, timeout, agent: false,
-      headers: body == null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      host: '127.0.0.1', port: PORT, path: urlPath, method, timeout, agent: false, headers,
     }, res => {
       let data = '';
       res.setEncoding('utf8');
-      const done = () => resolve({ r: 'ok', status: res.statusCode, kitchen: res.headers['x-monkey-kitchen'] === '1', data });
+      const done = () => resolve({ r: 'ok', status: res.statusCode, kitchen: res.headers['x-monkey-kitchen'] === '1', proof: res.headers['x-mk-proof'], data });
       res.on('data', d => { data += d; if (data.length >= max) { done(); res.destroy(); } });
       res.on('end', done);
       res.on('error', done);
@@ -87,16 +96,26 @@ function request(method, urlPath, body, timeout, max = 1e5) {
   });
 }
 const wait = () => Math.max(50, Math.min(600, left()));
-const post = async body => { const a = await request('POST', '/hook', body, wait()); return a.r !== 'ok' ? a.r : a.kitchen ? 'ok' : 'foreign'; };
+// Posted only after a proof. 'locked' if it then refuses the key after all (its key file changed in between).
+const post = async body => { const a = await request('POST', '/hook', body, wait(), 1e5, true); return a.r !== 'ok' ? a.r : !a.kitchen ? 'foreign' : a.status === 401 ? 'locked' : 'ok'; };
 
-// Who owns the port, asked without sending the payload: 'kitchen' (with its /health info), 'legacy' (a kitchen from
-// before /health, which cannot be told to leave), 'foreign' (another program), 'refused' (nobody) or 'fail' (no answer).
+// Who owns the port, asked without sending the payload or the token:
+//   'kitchen' our kitchen: its /health answered our random challenge with HMAC(token, 'health:' + challenge)
+//   'old'     a kitchen from before keys (older than FIRST_KEYED): replaced at startup through its open /shutdown
+//   'locked'  a kitchen that cannot prove our key (another key file, or one we could not read)
+//   'legacy'  a kitchen from before /health, which cannot be told to leave
+//   'foreign' another program; 'refused' nobody; 'fail' no answer
 async function probe() {
-  const h = await request('GET', '/health', null, wait());
+  const c = crypto.randomBytes(16).toString('hex');
+  const h = await request('GET', `/health?c=${c}`, null, wait());
   if (h.r !== 'ok') return { kind: h.r };
   let info = null;
   try { info = JSON.parse(h.data); } catch { /* not a kitchen's health */ }
-  if (h.kitchen || (h.status === 200 && info?.app === 'monkey-kitchen')) return { kind: 'kitchen', info };
+  if (h.kitchen || (h.status === 200 && info?.app === 'monkey-kitchen')) {
+    if (TOKEN && sameToken(h.proof, healthProof(TOKEN, c))) { proven = true; return { kind: 'kitchen', info }; }
+    if (info?.app === 'monkey-kitchen' && olderVersion(info.version, FIRST_KEYED)) return { kind: 'old', info };
+    return { kind: 'locked' };
+  }
   const st = await request('GET', '/state', null, wait(), 200);
   if (st.r === 'ok' && st.status === 200 && /^\{"now":\d+,"sessions":\[/.test(st.data)) return { kind: 'legacy' };
   return { kind: 'foreign' };
@@ -132,20 +151,23 @@ function olderVersion(a, b) {
 // Only an older release, or one whose folder is gone, gives way: two live installs must not keep killing each other.
 const outdated = info => olderVersion(info?.version, version()) || (typeof info?.root === 'string' && !fs.existsSync(info.root));
 
-// Ask a running kitchen to leave and wait until the port is free; false when it stays.
-async function retire() {
-  const bye = await request('POST', '/shutdown', '{}', wait());
+// Ask a running kitchen to leave and wait until the port is free; false when it stays. The token goes only to our
+// own (proven) kitchen; an old keyless one is asked without it.
+async function retire(withToken) {
+  const bye = await request('POST', '/shutdown', '{}', wait(), 1e5, withToken);
   if (bye.r !== 'ok' || bye.status >= 300) return false;
   while (left() > 600) { if ((await request('GET', '/health', null, 300)).r === 'refused') return true; await sleep(100); }
   return false;
 }
 
-// The payload is posted only to a port that has identified itself as a kitchen. Returns 'ok', 'legacy',
-// 'foreign', 'refused' or 'fail'.
+// The payload (and the token) go only to our own kitchen. Returns 'ok', 'legacy', 'locked', 'foreign', 'refused'
+// or 'fail'. At startup an outdated kitchen is replaced: ours with the token, an old keyless one without it.
 async function relay(body, source) {
   t0 = Date.now();
+  const startup = CONTEXT && source === 'startup';
   let p = await probe();
-  if (p.kind === 'kitchen' && CONTEXT && source === 'startup' && outdated(p.info) && await retire()) p = { kind: 'refused' };
+  if (p.kind === 'old') p = startup && await retire(false) ? { kind: 'refused' } : { kind: 'legacy' };
+  else if (p.kind === 'kitchen' && startup && outdated(p.info) && await retire(true)) p = { kind: 'refused' };
   if (p.kind === 'kitchen') return post(body);
   // Only a refused connection means no server is running; a timeout or reset must not spawn another.
   if (p.kind !== 'refused') return p.kind;
@@ -155,7 +177,8 @@ async function relay(body, source) {
   while (left() > 250) {
     await sleep(200);
     const q = await probe();
-    if (q.kind === 'kitchen') { r = await post(body); if (r === 'ok') { if (mine) dropLock(); return r; } }
+    if (q.kind === 'kitchen') { r = await post(body); if (r === 'ok' || r === 'locked') { if (mine) dropLock(); return r; } }
+    else if (q.kind === 'old') return 'legacy';
     else if (q.kind !== 'refused' && q.kind !== 'fail') return q.kind;
   }
   return r;
@@ -174,16 +197,29 @@ try {
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
     const body = slim(payload);
     body._mk = { id: crypto.randomUUID(), ts: TS, projectDir: process.env.CLAUDE_PROJECT_DIR || null };
-    status = await relay(JSON.stringify(body), payload.source);
-  }
+    // Without a key no kitchen can be ours: nothing is sent and none is started.
+    status = TOKEN ? await relay(JSON.stringify(body), payload.source) : 'nokey';
+  } else if (!TOKEN) status = 'nokey';
 
-  if (CONTEXT && process.env.MONKEY_KITCHEN_ROUTING !== 'off') {
-    const rules = fs.readFileSync(path.join(ROOT, 'brigade', 'head-chef.md'), 'utf8');
-    const where = status === 'foreign'
-      ? `The kitchen view is off: port ${PORT} is used by another program. Set MONKEY_KITCHEN_PORT to a free port.`
-      : status === 'legacy'
-        ? `An older Monkey Kitchen server is still running on port ${PORT}. Stop it once (close the process listening on that port); the next session starts the new one.`
-        : `The live kitchen view is at http://localhost:${PORT}.`;
+  if (CONTEXT) {
+    // Routing off keeps the view: the session still needs its link, just not the rules.
+    const rules = process.env.MONKEY_KITCHEN_ROUTING === 'off'
+      ? 'The Monkey Kitchen plugin is showing this session in its kitchen view. Its routing rules are switched off here, so work as you normally would.'
+      : fs.readFileSync(path.join(ROOT, 'brigade', 'head-chef.md'), 'utf8');
+    // The link carries the read-only page key, never the master token, and is given only for a kitchen that proved
+    // it holds our key (now, or earlier in this run when the last attempt then failed).
+    const link = `The live kitchen view is at http://localhost:${PORT}/?k=${PAGE} (this link unlocks the page in your browser; share it only with the user).`;
+    const where = status === 'nokey'
+      ? 'The kitchen view is unavailable: no key file could be created in your home folder.'
+      : status === 'foreign'
+        ? `The kitchen view is off: port ${PORT} is used by another program. Set MONKEY_KITCHEN_PORT to a free port.`
+        : status === 'legacy'
+          ? `An older Monkey Kitchen server is still running on port ${PORT}. Stop it once (close the process listening on that port); the next session starts the new one.`
+          : status === 'locked'
+            ? `The Monkey Kitchen server on port ${PORT} uses a different key, so this session cannot reach it. Stop it once (close the process listening on that port); the next session starts a new one.`
+            : status === 'ok' || proven
+              ? link
+              : `The kitchen view could not be started on port ${PORT}.`;
     out = JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'SessionStart',

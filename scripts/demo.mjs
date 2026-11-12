@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveToken, pageKey } from '../server/token.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'hook.mjs');
 const FAST = process.argv.includes('--fast');
@@ -57,7 +58,9 @@ const REPORT = {
 const stop = c => send('SubagentStop', { ...c, last_assistant_message: REPORT[c.agent_id] });
 const tool = (who, tool_name, tool_input) => send('PreToolUse', { ...who, ...effort(who), tool_name, tool_input });
 
-console.log('Playing a demo service. Watch http://localhost:' + (process.env.MONKEY_KITCHEN_PORT || 4747));
+// The keyed link (read-only page key): opening it once unlocks the kitchen page in that browser.
+const KEY = pageKey(resolveToken());
+console.log('Playing a demo service. Watch http://localhost:' + (process.env.MONKEY_KITCHEN_PORT || 4747) + (KEY ? '/?k=' + KEY : ''));
 
 send('SessionStart', { source: 'startup' });
 send('UserPromptSubmit', { prompt: 'Add a "banana of the day" card to the home page, backed by a new /api/banana endpoint, with tests.' });

@@ -7,7 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  runNode, HOOK, ROOT, freePort, request, tempDir, rmDir, sleep, pidCaptureEnv, readPids, cleanupStrays, pidsListeningOn,
+  runNode, HOOK, ROOT, freePort, request, tempDir, rmDir, sleep, pidCaptureEnv, readPids, cleanupStrays, pidsListeningOn, proofFor,
 } from './helpers/kitchen.mjs';
 
 let dir;
@@ -28,7 +28,8 @@ const lockFile = port => path.join(os.tmpdir(), `monkey-kitchen-${port}.lock`);
 let nPid = 0;
 const newPidFile = () => { const f = path.join(dir, `pids-${nPid++}.txt`); pidFiles.push(f); return f; };
 
-// A small HTTP server that records every request. `handler(req, body, res)` may answer; otherwise 204 (+ kitchen header if `kitchen`).
+// A small HTTP server that records every request. `handler(req, body, res)` may answer; otherwise 204 (+ kitchen header
+// if `kitchen`). A `kitchen` stands in for our own: its /health proves it holds TEST_TOKEN, so the hook posts to it.
 async function capture({ kitchen = true, handler } = {}) {
   const hits = [];
   const port = await freePort();
@@ -39,6 +40,10 @@ async function capture({ kitchen = true, handler } = {}) {
       const body = Buffer.concat(chunks).toString('utf8');
       hits.push({ method: req.method, url: req.url, headers: req.headers, body });
       if (handler && handler(req, body, res, srv) !== false) return;
+      if (kitchen && req.url.startsWith('/health')) {
+        res.writeHead(200, { 'content-type': 'application/json', 'x-monkey-kitchen': '1', 'x-mk-proof': proofFor(req.url) || '' }).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: VERSION, root: ROOT }));
+        return;
+      }
       res.writeHead(204, kitchen ? { 'x-monkey-kitchen': '1' } : {}).end();
     });
   });
@@ -101,7 +106,7 @@ test('foreign port with --context: additionalContext ends with a note that the k
   // Answers /health with some other app's JSON, and everything else without the kitchen header.
   const cap = await capture({
     kitchen: false,
-    handler: (req, body, res) => { if (req.url === '/health') { res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true,"app":"something-else"}'); return true; } return false; },
+    handler: (req, body, res) => { if (req.url.startsWith('/health')) { res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true,"app":"something-else"}'); return true; } return false; },
   });
   const pidFile = newPidFile();
   const r = await runNode([HOOK, '--context'], { input: JSON.stringify({ session_id: 'f2', hook_event_name: 'SessionStart', source: 'startup' }), env: { MONKEY_KITCHEN_PORT: String(cap.port), ...pidCaptureEnv(pidFile) } });
@@ -136,11 +141,11 @@ test('start stampede: 6 hooks at once with nothing listening start exactly one s
   assert.equal(fs.existsSync(lockFile(port)), false, 'lock file removed');
 });
 
-test('version handshake: with --context, a kitchen of another version is asked to shut down and a real server takes its place', { timeout: 30000 }, async () => {
+test('version handshake: with --context, an old keyless kitchen is asked (without the key) to shut down and a real server takes its place', { timeout: 30000 }, async () => {
   let fakeUp = true;
   const cap = await capture({
     handler: (req, body, res, srv) => {
-      if (req.url === '/health') {
+      if (req.url.startsWith('/health')) {
         res.writeHead(200, { 'content-type': 'application/json', 'x-monkey-kitchen': '1' }).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: '0.0.1-old', root: ROOT }));
         return true;
       }
@@ -157,7 +162,10 @@ test('version handshake: with --context, a kitchen of another version is asked t
   const sid = 'handshake-' + Date.now();
   const r = await runNode([HOOK, '--context'], { input: JSON.stringify({ session_id: sid, hook_event_name: 'SessionStart', source: 'startup' }), env: { MONKEY_KITCHEN_PORT: String(port), ...pidCaptureEnv(pidFile) }, timeout: 15000 });
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(cap.hits.filter(h => h.method === 'POST' && h.url === '/shutdown').length, 1, 'old server asked to shut down');
+  const byes = cap.hits.filter(h => h.method === 'POST' && h.url === '/shutdown');
+  assert.equal(byes.length, 1, 'old server asked to shut down');
+  assert.equal(byes[0].headers['x-mk-token'], undefined, 'the old keyless server is not sent the key');
+  assert.ok(cap.hits.every(h => h.headers['x-mk-token'] === undefined), 'nothing it received carried the key');
   assert.equal(fakeUp, false);
   assert.equal(cap.posts().length, 0, 'the event did not go to the old server');
   const h = JSON.parse((await request(port, { path: '/health' })).body);

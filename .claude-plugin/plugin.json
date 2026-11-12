@@ -1,7 +1,7 @@
 {
   "name": "monkey-kitchen",
   "displayName": "Monkey Kitchen",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "description": "Your main session becomes Head Chef over eleven subagents on Opus or better: parallel tickets, effort matched to difficulty, checked results, and a live kitchen view at http://localhost:4747.",
   "author": { "name": "noarmsfourhands-lab", "url": "https://github.com/noarmsfourhands-lab" },
   "homepage": "https://github.com/noarmsfourhands-lab/MonkeyKitchen",

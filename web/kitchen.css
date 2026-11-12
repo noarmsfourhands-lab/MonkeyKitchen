@@ -98,6 +98,11 @@ body {
 }
 /* kept in the page as a live region; shown only with .on (an empty, invisible box otherwise) */
 .offline:not(.on) { opacity: 0; pointer-events: none; padding: 0; border-width: 0; }
+/* locked: the same banner, as a card in the middle of the scene */
+.offline.locked.on {
+  top: 50%; transform: translate(-50%, -50%); width: min(30em, calc(100% - 16px));
+  padding: 14px 18px; font-size: 15px; letter-spacing: .02em; line-height: 1.45; border-color: #ffe27a;
+}
 
 /* the text box under the screen */
 .dialog {

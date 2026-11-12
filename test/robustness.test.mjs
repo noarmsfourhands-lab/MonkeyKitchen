@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { startKitchen, ROOT } from './helpers/kitchen.mjs';
+import { startKitchen, ROOT, TEST_TOKEN } from './helpers/kitchen.mjs';
 
 let k;
 before(async () => { k = await startKitchen(); });
@@ -77,7 +77,7 @@ test('an oversized POST /hook body returns 413', async () => {
   const total = 6 * 1024 * 1024, chunk = Buffer.alloc(64 * 1024, 'a');
   const status = await new Promise((resolve, reject) => {
     let answered = false;
-    const req = http.request({ host: '127.0.0.1', port: k.port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': total } }, res => {
+    const req = http.request({ host: '127.0.0.1', port: k.port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': total, 'x-mk-token': TEST_TOKEN } }, res => {
       answered = true; res.resume(); resolve(res.statusCode);
     });
     req.on('error', e => { if (!answered) reject(e); });

@@ -7,7 +7,7 @@ No API key and no npm dependencies. It needs Node 18 or newer on your PATH as no
 ## What it does
 
 - **Routes work to the right cook, many at once.** At session start the plugin gives the Head Chef a short set of rules: which cook gets which kind of ticket, how to keep many tickets cooking in parallel, when to do the work itself, and when to escalate.
-- **Shows the kitchen.** Hooks forward session events to a small local server, and the page at http://localhost:4747 animates whoever is working.
+- **Shows the kitchen.** Hooks forward session events to a small local server, and a page on http://localhost:4747 animates whoever is working. The page is locked to you: see [The key](#the-key).
 - **Keeps a tab.** Token counts per model tier are read from the session transcripts and priced at API list prices, next to an estimate of the same tokens at the Head Chef's price.
 
 ## The brigade
@@ -60,7 +60,7 @@ The Health Inspector patrols with a clipboard, a failed tool call smashes a plat
 - Node 18+ on PATH as `node`. Without it every hook fails: no kitchen view, and the Head Chef gets no rules.
 - Opus access for the cooks; Fable recommended for your main session (the Sous Chef runs on it).
 - The cooks run on Opus (the Sous Chef on your main model) and the Head Chef runs up to about ten at once, so a big job uses plan limits faster than a single session. The rules add about 1,700 tokens to each session.
-- Privacy: hooks send prompts and tool inputs only to 127.0.0.1. The server makes no outbound calls and writes nothing to disk.
+- Privacy: hooks send only the fields the kitchen uses, never file contents or command output, and only to 127.0.0.1. The server makes no outbound calls and writes one file, the key. While it starts the server, a hook also keeps a short-lived lock file in the system temp folder.
 
 ## Install
 
@@ -80,7 +80,7 @@ From GitHub, once published:
 
 For a single session while developing: `claude --plugin-dir /path/to/MonkeyKitchen`.
 
-Start a new session, then open http://localhost:4747. The server starts when a session starts, and shuts itself down after twelve hours with no events and no page open.
+Start a new session, then run `/monkey-kitchen:kitchen` (or ask the Head Chef for the kitchen link). You get a link of the form `http://localhost:4747/?k=<key>`. Open it once; from then on plain http://localhost:4747 works in that browser. The server starts when a session starts, and shuts itself down after twelve hours with no events and no page open.
 
 ## Try it without spending tokens
 
@@ -97,15 +97,36 @@ This plays a scripted service through the real hook relay, with a fake transcrip
 | `MONKEY_KITCHEN_PORT` | Port for the server and page. Default `4747`. |
 | `MONKEY_KITCHEN_ROUTING=off` | Keep the visualization but don't give the Head Chef the routing rules. |
 | `MONKEY_KITCHEN_STALE_MS` | How long a cook can be silent before it is shown as quiet. Default 900000 (15 minutes). |
+| `MONKEY_KITCHEN_TOKEN` | The key, as 32 hex characters. When unset or not 32 hex characters, the key file is used (see [The key](#the-key)). |
 
 Edit `brigade/head-chef.md` to change the routing rules, `agents/*.md` to change a cook, and `server/pricing.json` to change prices.
 
-An installed copy is a snapshot taken at install time (~/.claude/plugins/cache/monkey-kitchen/monkey-kitchen/<version>). After editing, bump version in .claude-plugin/plugin.json, run /plugin marketplace update monkey-kitchen, and update the plugin; for live edits use claude --plugin-dir.
+A plugin installed from a local folder marketplace is read in place, so edits take effect at the next session start or after `/reload-plugins`, with no version bump. A plugin installed from GitHub is copied into `~/.claude/plugins/cache/` per version, and an update is only detected when `version` in `.claude-plugin/plugin.json` changes, so bump it on every release. To update, run `/plugin marketplace update monkey-kitchen`, then update the plugin from `/plugin` (or in a shell: `claude plugin marketplace update monkey-kitchen`, then `claude plugin update monkey-kitchen@monkey-kitchen`), then restart the session. A running kitchen server from an older version is replaced automatically the next time a session starts.
+
+## The key
+
+The server and the hooks share a secret key. It is kept in `~/.claude/monkey-kitchen/token`, created on first use and readable only by you on macOS and Linux. When `MONKEY_KITCHEN_TOKEN` holds 32 hex characters, that is used instead.
+
+- Hooks send the key with every event, and only to a server that first proves it holds the same key. Another program sitting on the port gets nothing.
+- The page uses a second, read-only key derived from the first. At session start the Head Chef is given a link of the form `http://localhost:4747/?k=<page key>`. Opening it once sets a cookie in that browser, and from then on plain http://localhost:4747 works there. Run `/monkey-kitchen:kitchen` in a session to have the Head Chef give you the link.
+- The page key can only read. It cannot add events or stop the server, and the main key never appears in the link, the cookie, or the session transcript.
+- Without the key the page loads but shows "This kitchen is locked" and no session data. `/health` and the page's own files stay open.
+- With `MONKEY_KITCHEN_ROUTING=off` the session still gets the link; only the routing rules are left out.
+
+What it protects, and what it does not:
+
+- It stops other users on the machine, and other programs that cannot read your files. A program running as you can read the key file (and your transcripts) anyway.
+- The link contains the page key. Anyone who has it and can reach your machine's loopback address can read the kitchen, so do not paste it into public places.
+- Browser cookies for `localhost` are shared across ports, so other local web servers you visit can see the page key cookie. That is why it is read-only. A second kitchen on another port with a different key replaces the cookie.
+- On Windows the key folder's permissions are tightened to your account when it is created. On macOS and Linux the file is created readable only by you.
+- To change the key, delete `~/.claude/monkey-kitchen/token`. The next event creates a new one, the running server picks it up, and open pages lock until you open the new link.
 
 ## Turn it off for one project
 
-- Keep the view, drop the routing: in the project's `.claude/settings.local.json`, add `"env": { "MONKEY_KITCHEN_ROUTING": "off" }`.
-- Turn the whole plugin off there: `"enabledPlugins": { "monkey-kitchen@monkey-kitchen": false }` in the project's `.claude/settings.json`.
+- Turn the whole plugin off there: run `claude plugin disable monkey-kitchen@monkey-kitchen --scope local` in that project, or set `"enabledPlugins": { "monkey-kitchen@monkey-kitchen": false }` in the project's `.claude/settings.local.json`.
+- Keep the view, drop the routing: add `"env": { "MONKEY_KITCHEN_ROUTING": "off" }` to the project's `.claude/settings.local.json`.
+
+Project settings apply once you have trusted the folder.
 
 ## How it works
 
@@ -114,9 +135,11 @@ Claude Code ──hooks──▶ scripts/hook.mjs ──POST /hook──▶ serv
 ```
 
 - `hooks/hooks.json` registers ten hooks. All but `SessionStart` run in the background, and `PostToolUse` fires only for the Agent tool.
-- `scripts/hook.mjs` sends only the fields the kitchen uses, never file contents or command output. It stamps each event with an id and the time, starts the server when it is not running, replaces an older server after a plugin update, and always exits cleanly.
-- `server/server.mjs` keeps the state in memory and listens on `127.0.0.1` only. It pairs each ticket to its cook using the Agent tool's result, ignores late and duplicate events, and streams the watched session to the page.
+- `scripts/hook.mjs` sends only the fields the kitchen uses, never file contents or command output, with the key. It stamps each event with an id and the time, starts the server when it is not running, replaces an older server after a plugin update, and always exits cleanly.
+- `server/server.mjs` keeps the state in memory and listens on `127.0.0.1` only. It pairs each ticket to its cook using the Agent tool's result, ignores late and duplicate events, and streams the watched session to the page. When the server restarts mid-session (a crash, a plugin update, the idle shutdown), the next event from that session makes it rebuild the current order and its cooks (ticket, steps, report) from the session's transcript files.
 - `server/usage.mjs` reads the session transcript and the subagent transcripts beside it, and prices each message by its model.
+
+`.claude-plugin/icon.png` is generated from the page's own pixel art by `node tools/make-icon.mjs`.
 
 ## Limits of the tab
 
@@ -127,7 +150,9 @@ Claude Code ──hooks──▶ scripts/hook.mjs ──POST /hook──▶ serv
 
 ## Tests
 
-`npm test` runs the suite in `test/` with Node's built-in runner. It starts its own servers on random ports and needs no setup.
+`npm test` runs the suite in `test/` (124 tests) with Node's built-in runner. It starts its own servers on random ports and needs no setup.
+
+`.github/workflows/test.yml` runs the suite on Windows, macOS and Linux with Node 18, 20, 22 and 24 on every push and pull request. Locally it has only been run on Windows with Node 24 so far.
 
 ## License
 

@@ -1,18 +1,25 @@
 // Monkey Kitchen server. No dependencies.
-//   POST /hook      hook payloads, trimmed by scripts/hook.mjs
-//   POST /shutdown  asks this server to exit (hook.mjs replaces a server from another version)
-//   GET  /events    server-sent events: one v2 frame per change for the watched session (?session=<id>)
-//   GET  /cook      ?session=<id>&id=<cookId>: one cook's full prompt, report and log
-//   GET  /chef      ?session=<id>: the Head Chef's full log
-//   GET  /state     every session in full, as JSON (debugging and tests)
-//   GET  /health    {ok, app, version, root}
-//   GET  /          the kitchen page
+//   POST /hook      hook payloads, trimmed by scripts/hook.mjs                       (master)
+//   POST /shutdown  asks this server to exit (hook.mjs replaces a server from another version) (master)
+//   GET  /events    server-sent events: one v2 frame per change for the watched session (?session=<id>)  (read)
+//   GET  /cook      ?session=<id>&id=<cookId>: one cook's full prompt, report and log  (read)
+//   GET  /chef      ?session=<id>: the Head Chef's full log                            (read)
+//   GET  /state     every session in full, as JSON (debugging and tests)               (read)
+//   GET  /auth      {ok: true} with read access, else 401 {ok: false}
+//   GET  /health    {ok, app, version, root}; with ?c=<32 hex> also header x-mk-proof   (open: no session data)
+//   GET  /?k=<page key>  sets the mk cookie to the page key and redirects to /
+//   GET  /          the kitchen page and its files                                     (open: public code)
+// (master): header x-mk-token=<master token> only, else 401. (read): cookie mk or header x-mk-page = <page key>, or
+// header x-mk-token = <master token>, else 401 {error: 'locked'}. Keys and proofs come from server/token.mjs.
 
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { UsageMeter } from './usage.mjs';
+import { UsageMeter, tierOf } from './usage.mjs';
+import { resolveToken, envToken, readTokenFile, tokenFile, hardenTokenFile, pageKey, healthProof, NONCE, sameToken } from './token.mjs';
+import { readBack } from './recover.mjs';
 
 const PORT = Number(process.env.MONKEY_KITCHEN_PORT) || 4747;
 const HOST = '127.0.0.1';
@@ -30,6 +37,37 @@ const MAX_SESSIONS = 50;
 const BROADCAST_MS = 150;
 const MAX_BACKLOG = 2 * 1024 * 1024; // an SSE client this far behind is dropped; it reconnects
 const MAX_BODY = 5e6;
+const COOKIE_MAX_AGE = 31536000;
+const KEY_REREAD_MS = 30000;
+const RECOVER_DELAY_MS = Number(process.env.MONKEY_KITCHEN_RECOVER_DELAY_MS) || 0; // tests: let live events land first
+
+// The master token (hook: x-mk-token) and the page key derived from it (browser: mk cookie, x-mk-page). A token from
+// the key file is checked again when a request is refused or a proof is asked for, so a replaced file is adopted.
+const KEYS = { token: '', page: '', fromEnv: false, sig: null, readAt: 0 };
+function setKeys(t) { KEYS.token = t; KEYS.page = pageKey(t); }
+const fileSig = () => { try { const st = fs.statSync(tokenFile()); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return null; } };
+{
+  const env = envToken();
+  if (env) { setKeys(env); KEYS.fromEnv = true; } else {
+    const t = resolveToken();
+    if (t) { hardenTokenFile(); setKeys(t); KEYS.sig = fileSig(); KEYS.readAt = Date.now(); }
+    // Without a usable token nobody can be let in: a random one keeps the kitchen locked rather than open.
+    else { console.warn('Monkey Kitchen: no token available; the kitchen stays locked.'); setKeys(crypto.randomBytes(16).toString('hex')); }
+  }
+}
+// The file is read again when it changed (stat), else at most once every KEY_REREAD_MS.
+function recheckKeys() {
+  if (KEYS.fromEnv) return;
+  const sig = fileSig(), now = Date.now();
+  if (sig === KEYS.sig && now - KEYS.readAt < KEY_REREAD_MS) return;
+  KEYS.sig = sig; KEYS.readAt = now;
+  const r = readTokenFile();
+  if (r.state !== 'ok' || r.key === KEYS.token) return;
+  setKeys(r.key);
+  // Pages opened with the old key lose the feed; they reconnect and find the kitchen locked.
+  for (const cl of clients) cl.res.destroy();
+  clients.clear();
+}
 
 const BRIGADE = new Set(['sous-chef', 'chef-de-partie', 'frontend-cook', 'backend-cook', 'line-cook', 'taster', 'inspector', 'prep-cook', 'runner', 'dishwasher', 'scribe']);
 const ROLE_NAME = {
@@ -105,10 +143,15 @@ function getSession(p) {
       order: null, chef: idle(), chefLog: [], cooks: new Map(), pending: [], feed: [],
       calls: new Map(), known: new Map(), early: new Map(), ended: new Set(), promptAt: 0, lastStopAt: 0, endTimer: null,
       dropped: 0, lastDrop: null, usage: null, meter: null, scans: new Map(), effort: '', chefBefore: null, waitingAt: 0, waitingFor: null, lastToolAt: 0, lastToolBy: null,
+      // A session met mid-flight (the server restarted under it) is read back from its transcripts, once. A brand-new
+      // one (SessionStart from startup or /clear) has nothing to read back, and one first seen ending needs nothing.
+      recover: (p.hook_event_name === 'SessionStart' && (p.source === 'startup' || p.source === 'clear')) || p.hook_event_name === 'SessionEnd' ? 'no' : 'want',
+      recovered: false, closed: false,
     };
     sessions.set(s.id, s);
   }
   if (p.transcript_path && !s.meter) s.meter = new UsageMeter(p.transcript_path);
+  if (s.recover === 'want' && s.meter) startRecovery(s);
   // The project is the dir Claude Code was opened in; cwd drifts as the work moves, so only the first one counts.
   const dir = p._mk?.projectDir;
   if (dir && base(dir)) { s.project = base(dir); s.fixedProject = true; }
@@ -138,7 +181,8 @@ function setTicket(c, ticket, prompt) { c.ticket = ticket; c.prompt = prompt; c.
 
 function finish(s, c, status) {
   c.status = status; c.endedAt = Date.now();
-  s.ended.add(c.id); trim(s.ended, 1000);
+  // A rebuilt cook's end is a guess (the sweep giving it up, say): a live event from it may still come.
+  if (!c.rebuilt) { s.ended.add(c.id); trim(s.ended, 1000); }
 }
 
 function dropPlate(s, by, who, tool, agentType) {
@@ -235,6 +279,9 @@ function handle(p) {
       if (ev === 'PostToolUseFailure') { dropPlate(s, p.agent_id, roleOf(p.agent_type), p.tool_name, p.agent_type); broadcast(); }
       return;
     }
+    // A rebuilt cook's status was read from its transcript; its first live event is the truth (one guessed done is
+    // still at work), and from then on it is a cook like any other.
+    if (c.rebuilt) { c.rebuilt = false; if (c.status !== 'working') { c.status = 'working'; c.endedAt = 0; } }
     // Quiet is not finished (a slow permission prompt, one long step): any event from it brings it back.
     if (c.status === 'quiet') c.status = 'working';
     // A finished cook stays finished: late async events must not bring it back.
@@ -248,6 +295,7 @@ function handle(p) {
   switch (ev) {
     case 'SessionStart':
       clearTimeout(s.endTimer);
+      s.closed = false;
       say(s, 'head-chef', `opened the kitchen in ${s.project}`);
       break;
 
@@ -345,6 +393,7 @@ function handle(p) {
       break;
 
     case 'SessionEnd':
+      s.closed = true;
       s.chef = idle();
       s.lastStopAt = Math.max(s.lastStopAt, at);
       if (s.order) s.order.status = 'served';
@@ -386,6 +435,122 @@ async function runScan(s) {
   } catch { /* transcript not readable yet */ }
 }
 
+// ---------- read back after a restart ----------
+// A transcript's user record as an order, or null. The same tests as a live UserPromptSubmit (reminders stripped,
+// machine turns skipped), plus what only transcripts hold: tool results, meta records (skill text, a cook's
+// hand-back), turns of non-human origin, shell-mode input and output, memory input, local command output and the
+// interrupt marker.
+const TRANSCRIPT_ONLY = /^(?:<local-command-|<bash-input>|<bash-stdout>|<bash-stderr>|<user-memory-input>|\[Request interrupted by user)/;
+function promptOf(rec) {
+  if (rec.isMeta || rec.isSidechain) return null;
+  const kind = rec.origin && typeof rec.origin === 'object' ? rec.origin.kind : undefined;
+  if (typeof kind === 'string' && kind !== 'human') return null;
+  const c = rec.message?.content;
+  let t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n') : '';
+  t = stripReminders(t);
+  if (!t || TRANSCRIPT_ONLY.test(t) || isMachineTurn(t)) return null;
+  // A slash command is written as markup; the hook saw it as typed.
+  const cmd = /<command-name>([^<]{1,200})<\/command-name>/.exec(t);
+  if (cmd && t.startsWith('<command-')) {
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(t)?.[1]?.trim();
+    t = cmd[1].trim() + (args ? ' ' + args : '');
+  }
+  return t;
+}
+
+// One read-back at a time: a restart under many sessions must not read all their transcripts at once.
+let recoverChain = Promise.resolve();
+function startRecovery(s) {
+  s.recover = 'running';
+  const file = s.meter.transcriptPath;
+  recoverChain = recoverChain
+    .then(() => (RECOVER_DELAY_MS ? new Promise(r => setTimeout(r, RECOVER_DELAY_MS)) : null))
+    .then(() => (sessions.get(s.id) === s ? readBack(file, { promptOf, describe }) : null))
+    .then(r => { if (r && sessions.get(s.id) === s) applyRecovery(s, r); })
+    .catch(() => { /* best effort: a read-back never disturbs the live kitchen */ })
+    .finally(() => { s.recover = 'done'; });
+}
+
+// A step's log entry as live events would make it.
+const logEntry = e => ({ t: Number(e?.t) || 0, kind: clip(e?.kind, 20) || 'tool', text: clip(e?.text, 200) });
+
+// Merge a cook's transcript steps (rcLog: its last 20, rcTools in all) with the steps live events added since the
+// restart. A live step matches at most one transcript step with the same text stamped within 10 s (the hook's stamp
+// and the record's trail each other); unmatched live steps newer than the transcript's last step are new.
+function mergeSteps(c, rcLog, rcTools) {
+  const twin = (e, l) => e.text === l.text && Math.abs(e.t - l.t) < 10000;
+  const lastT = rcLog.length ? rcLog[rcLog.length - 1].t : -Infinity;
+  const used = new Set();
+  const fresh = c.log.filter(l => {
+    const j = rcLog.findIndex((e, i) => !used.has(i) && twin(e, l));
+    if (j >= 0) { used.add(j); return false; }
+    return l.t > lastT;
+  });
+  // Every live step still on the log is new and the log is full: the ones scrolled off it are newer still.
+  const added = fresh.length && fresh.length === c.log.length && c.log.length >= 20 ? c.tools : fresh.length;
+  c.log = [...rcLog, ...fresh].sort((a, b) => a.t - b.t).slice(-20);
+  c.tools = rcTools + added;
+}
+
+// Fills gaps only: whatever live events set since the restart stays as it is. Rebuilt cooks are never put in
+// `ended`, and carry `rebuilt: true` until their first live event: a cook guessed done that is in fact still
+// at work comes back with that event, and its SubagentStop brings the real report.
+function applyRecovery(s, r) {
+  let any = false;
+  const liveOrder = !!s.order;
+  if (r.order && !liveOrder) {
+    const at = r.order.at;
+    // A live Stop that came after the prompt (or the session's end) already ended that turn.
+    const served = s.closed || r.order.served || s.lastStopAt >= at;
+    s.order = { text: clipLong(r.order.text, 4000), startedAt: at, status: served ? 'served' : 'cooking' };
+    s.promptAt = Math.max(s.promptAt, at);
+    if (!served && s.chef.status === 'idle') s.chef = { status: 'working', activity: 'Picking up where the kitchen left off', kind: 'think' };
+    any = true;
+  }
+  for (const rc of r.cooks) {
+    if (!idOk(rc.id)) continue;
+    // A new order arrived live: finished tickets of the old one stay off the rail, as a live prompt clears them.
+    if (liveOrder && rc.status !== 'working') continue;
+    // Clipped as live events are (the hook cuts these fields to 200 characters, the server clips the rest).
+    const agentType = clip(rc.agentType, 200), model = clip(rc.model, 200);
+    const ticket = clip(rc.description || rc.prompt, 200), prompt = clipLong(rc.prompt, 4000), report = clipLong(rc.report, 4000);
+    const rcLog = (Array.isArray(rc.log) ? rc.log : []).slice(-20).map(logEntry);
+    const rcTools = Math.max(0, Math.floor(Number(rc.tools) || 0), rcLog.length);
+    const startedAt = Number(rc.startedAt) || Date.now(), lastAt = Number(rc.lastAt) || Date.now();
+    let c = s.cooks.get(rc.id);
+    if (c) {
+      if (!c.agentType && agentType) { c.agentType = agentType; c.role = roleOf(agentType); }
+      if (!c.ticket && !c.prompt && !c.guessCall) setTicket(c, ticket, prompt);
+      if (!c.model && model) c.model = model;
+      if (!c.tier && model) c.tier = tierOf(model);
+      if (!c.report && c.status === 'done' && report) c.report = report;
+      mergeSteps(c, rcLog, rcTools);
+      c.startedAt = Math.min(c.startedAt, startedAt);
+      any = true;
+      continue;
+    }
+    if (s.ended.has(rc.id) || s.cooks.size >= 60) continue;
+    // The session ended before the read-back landed: nobody is still at work.
+    const done = rc.status === 'done' || !!s.closed;
+    const last = rcLog[rcLog.length - 1];
+    c = {
+      id: rc.id, agentType, role: roleOf(agentType), ticket: '', prompt: '', report: done ? report : '',
+      log: rcLog, activity: done ? '' : last?.text || '', kind: done ? 'think' : last?.kind || 'think', status: done ? 'done' : 'working',
+      // A cook silent since well before the restart is soon marked quiet by the sweep.
+      startedAt, endedAt: done ? lastAt : 0, lastEventAt: lastAt, tools: rcTools, model, tier: model ? tierOf(model) : '', effort: '', promptRev: 0, guessCall: null,
+      rebuilt: true,
+    };
+    setTicket(c, ticket, prompt);
+    s.cooks.set(c.id, c);
+    any = true;
+  }
+  if (!any) return;
+  s.recovered = true;
+  say(s, 'head-chef', 'picked up where the kitchen left off');
+  scheduleScan(s, 300, 'fast');
+  broadcast();
+}
+
 // Time-based housekeeping: forget old sessions, and settle cooks and chefs whose events stopped coming.
 function sweep() {
   const now = Date.now();
@@ -418,6 +583,7 @@ function fullView(s) {
   return {
     id: s.id, project: s.project, order: s.order, chef: chefOut(s), chefLog: s.chefLog,
     cooks: [...s.cooks.values()].map(({ guessCall, ...c }) => c), feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage: s.usage,
+    recovered: s.recovered,
   };
 }
 function frameView(s) {
@@ -426,7 +592,7 @@ function frameView(s) {
   return {
     id: s.id, project: s.project, order: s.order, chef: chefOut(s), chefLog: s.chefLog.slice(-8),
     cooks: [...s.cooks.values()].map(({ guessCall, prompt, report, log, ...c }) => ({ ...c, log: log.slice(-8), promptLen: prompt.length, reportLen: report.length })),
-    feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage,
+    feed: s.feed.slice(-60), dropped: s.dropped, lastDrop: s.lastDrop, usage, recovered: s.recovered,
   };
 }
 const summary = s => ({
@@ -478,6 +644,22 @@ function shutdown() {
   setTimeout(() => process.exit(0), 50);
 }
 
+// The keys a request carries. Writing (POST) takes the master token, in the x-mk-token header only. Reading (the data
+// GETs and /auth) takes the page key as cookie mk or header x-mk-page, or the master token in x-mk-token; the master
+// token is never accepted as a cookie or in a URL, so the browser never holds it.
+function cookieKeys(req) {
+  const out = [];
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === 'mk') out.push(part.slice(i + 1).trim());
+  }
+  return out;
+}
+const isMaster = req => sameToken(req.headers['x-mk-token'], KEYS.token);
+// Every candidate is compared, so the time taken does not depend on which one (if any) matched.
+const canRead = req => [isMaster(req), ...[req.headers['x-mk-page'], ...cookieKeys(req)].map(v => sameToken(v, KEYS.page))].includes(true);
+const DATA = new Set(['/events', '/state', '/cook', '/chef']);
+
 function route(req, res) {
   let url;
   try { url = new URL(req.url, `http://${HOST}:${PORT}`); } catch { res.writeHead(400).end(); return; }
@@ -485,6 +667,16 @@ function route(req, res) {
   if (req.method === 'POST' && (url.pathname === '/hook' || url.pathname === '/shutdown')) {
     // Only the local hook script posts here; refuse anything a web page sends.
     if (req.headers.origin) { res.writeHead(403).end(); return; }
+    // No key, no hearing: the body is discarded unread. The header still says this is a kitchen.
+    if (!isMaster(req)) recheckKeys(); // the key file may have been replaced since this server started
+    if (!isMaster(req)) {
+      let size = 0;
+      req.on('error', () => {});
+      req.on('data', d => { size += d.length; if (size > 64e6) req.destroy(); });
+      res.writeHead(401, { ...KITCHEN, 'content-type': 'text/plain; charset=utf-8' }).end('This kitchen needs its key (header x-mk-token).');
+      req.resume();
+      return;
+    }
     let body = '', size = 0;
     req.setEncoding('utf8'); // a character split across chunks must not be mangled
     req.on('error', () => {});
@@ -508,6 +700,25 @@ function route(req, res) {
   if (req.method !== 'GET') { res.writeHead(405).end(); return; }
   // A rebinding page reaches us under its own hostname; only answer to ours.
   if (!HOSTS.has(String(req.headers.host).toLowerCase())) { res.writeHead(403).end(); return; }
+
+  const readOk = () => { if (canRead(req)) return true; recheckKeys(); return canRead(req); };
+  if (DATA.has(url.pathname) && !readOk()) { json(res, 401, { error: 'locked' }); return; }
+  if (url.pathname === '/auth') { const ok = readOk(); json(res, ok ? 200 : 401, { ok }); return; }
+  if (url.pathname === '/' && url.searchParams.has('k')) {
+    // The link Claude Code gives the user carries the page key: it becomes the cookie, and leaves the address bar.
+    const k = url.searchParams.get('k');
+    if (!sameToken(k, KEYS.page)) recheckKeys();
+    if (!sameToken(k, KEYS.page)) {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        .end('This link does not unlock this kitchen: its key is wrong or out of date.\nRun /monkey-kitchen:kitchen in your Claude Code session for the current link.\n');
+      return;
+    }
+    res.writeHead(302, {
+      location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
+      'set-cookie': `mk=${KEYS.page}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
+    }).end();
+    return;
+  }
 
   if (url.pathname === '/events') {
     // ?session=<id> watches that session; unknown pins the most recent one; none follows whichever is most recent.
@@ -535,7 +746,11 @@ function route(req, res) {
   }
   if (url.pathname === '/state') { json(res, 200, snapshot()); return; }
   if (url.pathname === '/health') {
-    res.writeHead(200, { 'content-type': MIME['.json'], 'cache-control': 'no-cache', ...KITCHEN }).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: VERSION, root: ROOT }));
+    // ?c=<32 hex>: the hook's challenge. The proof shows this server holds the hook's token without revealing it.
+    const c = url.searchParams.get('c');
+    const headers = { 'content-type': MIME['.json'], 'cache-control': 'no-cache', ...KITCHEN };
+    if (c && NONCE.test(c)) { recheckKeys(); headers['x-mk-proof'] = healthProof(KEYS.token, c); }
+    res.writeHead(200, headers).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: VERSION, root: ROOT }));
     return;
   }
 

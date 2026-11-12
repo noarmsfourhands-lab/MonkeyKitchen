@@ -9,6 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pageKey, healthProof } from '../../server/token.mjs';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const SERVER = path.join(ROOT, 'server', 'server.mjs');
@@ -19,6 +20,12 @@ export const PID_PRELOAD = path.join(path.dirname(fileURLToPath(import.meta.url)
 const LIVE_PORT = 4747; // the user's real kitchen: never touched
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 export { sleep };
+
+// Every test server and hook child runs with this key, so no test reads or creates the user's real token file.
+export const TEST_TOKEN = '0123456789abcdef0123456789abcdef';
+export const TEST_PAGE = pageKey(TEST_TOKEN); // the read-only key the browser link and cookie carry
+// What a kitchen holding TEST_TOKEN answers to the hook's /health?c=<nonce> (null for a malformed nonce).
+export const proofFor = (url, token = TEST_TOKEN) => { try { return healthProof(token, new URL(url, 'http://x').searchParams.get('c')); } catch { return null; } };
 
 // Every child this process starts, so a crash still cleans up.
 const children = new Set();
@@ -46,14 +53,19 @@ export async function freePort() {
   throw new Error('no free port found');
 }
 
-// The test runner's and the user's environment must not leak into the children.
+// The test runner's and the user's environment must not leak into the children. Children get TEST_TOKEN unless
+// `extra` says otherwise; a key set to undefined in `extra` is removed.
 export function childEnv(extra = {}) {
   const env = { ...process.env };
-  for (const k of ['CLAUDE_PROJECT_DIR', 'MONKEY_KITCHEN_PORT', 'MONKEY_KITCHEN_STALE_MS', 'MONKEY_KITCHEN_SWEEP_MS', 'MONKEY_KITCHEN_ROUTING', 'MK_TEST_PIDFILE', 'MK_TEST_CWDFILE', 'NODE_TEST_CONTEXT', 'NODE_OPTIONS']) delete env[k];
-  return { ...env, ...extra };
+  for (const k of ['CLAUDE_PROJECT_DIR', 'MONKEY_KITCHEN_PORT', 'MONKEY_KITCHEN_STALE_MS', 'MONKEY_KITCHEN_SWEEP_MS', 'MONKEY_KITCHEN_ROUTING', 'MONKEY_KITCHEN_TOKEN', 'MONKEY_KITCHEN_RECOVER_DELAY_MS', 'MK_TEST_PIDFILE', 'MK_TEST_CWDFILE', 'NODE_TEST_CONTEXT', 'NODE_OPTIONS']) delete env[k];
+  const out = { ...env, MONKEY_KITCHEN_TOKEN: TEST_TOKEN, ...extra };
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return out;
 }
 
-export function request(port, { method = 'GET', path: p = '/', headers = {}, body } = {}) {
+// `token` is sent as x-mk-token (TEST_TOKEN by default; false or null sends none).
+export function request(port, { method = 'GET', path: p = '/', headers = {}, body, token = TEST_TOKEN } = {}) {
+  if (token) headers = { 'x-mk-token': token, ...headers };
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: p, method, headers, agent: false }, res => {
       const chunks = [];
@@ -229,7 +241,7 @@ export function watch(port, p = '/events', headers = {}) {
   const frames = [];
   const waiters = [];
   let res0 = null;
-  const req = http.get({ host: '127.0.0.1', port, path: p, agent: false, headers }, res => {
+  const req = http.get({ host: '127.0.0.1', port, path: p, agent: false, headers: { 'x-mk-token': TEST_TOKEN, ...headers } }, res => {
     res0 = res;
     let buf = '';
     res.setEncoding('utf8');

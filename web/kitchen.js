@@ -1274,17 +1274,56 @@ function connect(id) {
   connId = id || null;
   const src = new EventSource('/events' + (connId ? '?session=' + encodeURIComponent(connId) : ''));
   es = src;
-  src.onopen = () => setConn(true);
+  src.onopen = () => { setLocked(false); setConn(true); };
   src.onmessage = ev => {
     let f;
     try { f = JSON.parse(ev.data); } catch (err) { console.warn('Monkey Kitchen: unreadable snapshot', err); return; }
     try { onFrame(f); } catch (err) { console.error('Monkey Kitchen: could not show a snapshot', err); }
   };
   src.onerror = () => {
-    setConn(false);
     // an HTTP error closes an EventSource for good; anything else it retries by itself
-    if (src.readyState === EventSource.CLOSED) retryTimer = setTimeout(() => { if (es === src) connect(connId); }, 3000);
+    if (src.readyState !== EventSource.CLOSED) { setConn(false); return; }
+    // Closed by an HTTP error: a kitchen without our key (401) is locked, not down.
+    const retry = () => checkAuth().then(state => {
+      if (es !== src) return;
+      if (state === 'locked') { setLocked(true); retryTimer = setTimeout(retry, 5000); return; } // ask again, quietly
+      const wasLocked = locked;
+      setLocked(false);
+      if (state === 'ok' && wasLocked) { connect(connId); return; } // unlocked meanwhile (the link opened in another tab)
+      setConn(false);
+      retryTimer = setTimeout(() => { if (es === src) connect(connId); }, 3000);
+    });
+    retry();
   };
+}
+
+// 'ok', 'locked' (401 from /auth) or 'unknown' (no answer: the server is down or restarting).
+function checkAuth() {
+  return fetch('/auth', { cache: 'no-store', credentials: 'same-origin' })
+    .then(r => (r.status === 401 ? 'locked' : r.ok ? 'ok' : 'unknown'))
+    .catch(() => 'unknown');
+}
+
+// Locked: the scene stays dimmed with an explanation in place of the "Disconnected" banner. While locked the page
+// keeps asking, so opening the link in this browser (another tab) brings it in without a reload.
+let locked = false;
+function setLocked(on) {
+  if (on === locked) return;
+  locked = on;
+  const off = $('offline'), conn = $('conn');
+  off.classList.toggle('locked', on);
+  if (on) {
+    setConn(false); // dims the scene, stops the clocks and shows the banner, whose text is replaced here
+    conn.title = 'This kitchen is locked';
+    conn.setAttribute('aria-label', 'Locked');
+    off.textContent = 'This kitchen is locked. Open the link Claude Code gives you: run /monkey-kitchen:kitchen in your session.';
+    canvas.setAttribute('aria-label', 'Kitchen scene. This kitchen is locked.');
+  } else if (connected === false) {
+    // Back to plain "disconnected" until a frame arrives.
+    conn.title = 'Disconnected from the kitchen server';
+    conn.setAttribute('aria-label', 'Disconnected');
+    off.textContent = `Disconnected · last update ${lastMsgAt ? clockTime(lastMsgAt) : 'none yet'}`;
+  }
 }
 
 resetWorld();

@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { startKitchen, sleep, tempDir, rmDir, ROOT } from './helpers/kitchen.mjs';
+import { startKitchen, sleep, tempDir, rmDir, ROOT, TEST_TOKEN } from './helpers/kitchen.mjs';
 
 let k, dir;
 before(async () => { k = await startKitchen(); dir = tempDir('mk-hard-'); });
@@ -96,7 +96,7 @@ test('at most 50 sessions are kept; the least recently active one is evicted', {
 test('an oversized body gets 413 even when the client sends the whole body', { timeout: 20000 }, async () => {
   const body = Buffer.alloc(6 * 1024 * 1024, 'a');
   const r = await new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: k.port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length } }, res => {
+    const req = http.request({ host: '127.0.0.1', port: k.port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length, 'x-mk-token': TEST_TOKEN } }, res => {
       res.resume(); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers }));
     });
     req.on('error', reject);

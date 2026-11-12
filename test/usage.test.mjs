@@ -198,7 +198,7 @@ test('a malformed pricing.json does not stop the server from starting, and usage
   let kk;
   try {
     fs.mkdirSync(path.join(copy, 'server'));
-    for (const f of ['server.mjs', 'usage.mjs']) fs.copyFileSync(path.join(ROOT, 'server', f), path.join(copy, 'server', f));
+    for (const f of fs.readdirSync(path.join(ROOT, 'server')).filter(n => n.endsWith('.mjs'))) fs.copyFileSync(path.join(ROOT, 'server', f), path.join(copy, 'server', f));
     fs.writeFileSync(path.join(copy, 'server', 'pricing.json'), '{ "models": { this is not json');
     kk = await startKitchen({}, { server: path.join(copy, 'server', 'server.mjs') });
     assert.equal(await kk.health(), 200, 'server up');
