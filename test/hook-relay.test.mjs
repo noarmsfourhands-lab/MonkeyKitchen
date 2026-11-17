@@ -200,3 +200,28 @@ test('the auto-started server runs with the plugin root as its working directory
   assert.equal(removed, true, "the hook's folder can be deleted while the server runs");
   assert.equal((await request(port, { path: '/health' })).status, 200, 'server still running');
 });
+
+const FAIL_PRELOAD = new URL('./helpers/fail-server-preload.mjs', import.meta.url).href;
+
+test('the start lock: a hook whose server failed to start releases it; one it did not take is left alone', { timeout: 20000 }, async () => {
+  const failPort = await freePort(), heldPort = await freePort();
+  strays.push(failPort, heldPort);
+  // Start markers, not pids: these files are never handed to cleanupStrays (see fail-server-preload.mjs).
+  const failStarts = path.join(dir, 'starts-fail.txt'), heldStarts = path.join(dir, 'starts-held.txt');
+  const starts = file => { try { return fs.readFileSync(file, 'utf8').split(/\s+/).filter(Boolean).length; } catch { return 0; } };
+  const failing = file => ({ NODE_OPTIONS: `--import=${FAIL_PRELOAD}`, MK_TEST_STARTFILE: file });
+  // Another hook's start in progress: a fresh lock this hook did not take.
+  fs.writeFileSync(lockFile(heldPort), '');
+  const input = sid => JSON.stringify({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'x' });
+  const [failed, held] = await Promise.all([
+    runNode([HOOK], { input: input('lock-fail'), env: { MONKEY_KITCHEN_PORT: String(failPort), ...failing(failStarts) } }),
+    runNode([HOOK], { input: input('lock-held'), env: { MONKEY_KITCHEN_PORT: String(heldPort), ...failing(heldStarts) } }),
+  ]);
+  assert.equal(failed.code, 0, failed.stderr);
+  assert.equal(held.code, 0, held.stderr);
+  assert.ok(starts(failStarts) >= 1, 'the hook took the lock and tried to start a server');
+  assert.ok(!fs.existsSync(lockFile(failPort)), 'and released the lock when the start came to nothing');
+  assert.equal(starts(heldStarts), 0, 'a held lock: no start');
+  assert.ok(fs.existsSync(lockFile(heldPort)), 'and the other hook\'s lock is not removed');
+  fs.rmSync(lockFile(heldPort), { force: true });
+});

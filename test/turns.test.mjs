@@ -136,6 +136,43 @@ test('mid-turn, a SubagentStop stamped before the Notification leaves the chef w
   assert.equal(st.chef.status, 'waiting', 'a SubagentStop stamped before the Notification leaves it waiting');
 });
 
+test('a Notification carrying agent_id sets the chef waiting for that cook, whoever called a tool last', async () => {
+  const s = k.kitchenSession();
+  const t0 = Date.now();
+  await s.prompt('order', { ts: t0 });
+  await s.start('asker', LINE, { ts: t0 + 10 });
+  await s.start('sibling', LINE, { ts: t0 + 20 });
+  await s.tool(null, null, 'Grep', { pattern: 'needle' }, { ts: t0 + 30 });
+  const activity = (await s.get()).chef.activity;
+  await s.tool('asker', LINE, 'Bash', { command: 'deploy' }, { ts: t0 + 40 });
+  await s.tool('sibling', LINE, 'Read', { file_path: 'a.txt' }, { ts: t0 + 50 }); // the last tool caller is not the asker
+  await s.send('Notification', { agent_id: 'asker', agent_type: LINE, notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' }, { ts: t0 + 60 });
+  let st = await s.get();
+  assert.equal(st.chef.status, 'waiting', 'a cook\'s notification rings the bell');
+  assert.match(st.chef.activity, /needs your permission/);
+  assert.equal(st.cooks.find(c => c.id === 'asker').status, 'working', 'the notification does not finish or create anything');
+  await s.tool('sibling', LINE, 'Read', { file_path: 'b.txt' }, { ts: t0 + 70 });
+  assert.equal((await s.get()).chef.status, 'waiting', 'a sibling at work does not clear it');
+  await s.tool('asker', LINE, 'Read', { file_path: 'c.txt' }, { ts: t0 + 80 });
+  st = await s.get();
+  assert.equal(st.chef.status, 'working', 'the asker moving again clears it');
+  assert.equal(st.chef.activity, activity);
+});
+
+test('a Notification without agent_id still goes to the last tool caller', async () => {
+  const s = k.kitchenSession();
+  const t0 = Date.now();
+  await s.prompt('order', { ts: t0 });
+  await s.start('a1', LINE, { ts: t0 + 10 });
+  await s.start('a2', LINE, { ts: t0 + 20 });
+  await s.tool('a1', LINE, 'Bash', { command: 'deploy' }, { ts: t0 + 30 });
+  await s.send('Notification', { notification_type: 'permission_prompt', message: 'Needs you' }, { ts: t0 + 40 });
+  await s.tool('a2', LINE, 'Read', { file_path: 'x' }, { ts: t0 + 50 });
+  assert.equal((await s.get()).chef.status, 'waiting', 'not the asker');
+  await s.tool('a1', LINE, 'Read', { file_path: 'y' }, { ts: t0 + 60 });
+  assert.equal((await s.get()).chef.status, 'working', 'the asker');
+});
+
 test('mid-turn, a SubagentStop stamped after the Notification restores working with the previous activity', async () => {
   const s = k.kitchenSession();
   const t0 = Date.now();

@@ -17,15 +17,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveToken, pageKey, healthProof, sameToken } from '../server/token.mjs';
+import { resolveToken, healthProof, sameToken } from '../server/token.mjs';
+// Claude Code can put <system-reminder> blocks before the user's own words; they are dropped so the clip keeps the real text.
+import { stripReminders } from '../server/reminders.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // The master token goes only to a server that has proved it holds the same one (see probe()); the browser link
-// carries the read-only page key derived from it.
+// carries no key at all.
 const TOKEN = (() => { try { return resolveToken(); } catch { return null; } })();
-const PAGE = pageKey(TOKEN);
 const FIRST_KEYED = '0.3.0'; // kitchens older than this have no keys: they get no token, and no payload
 let proven = false; // a server proved our key at some point in this run
+let provenV6 = false; // and that server said (in /health) it also listens on [::1], so 'localhost' reaches it
 const PORT = Number(process.env.MONKEY_KITCHEN_PORT) || 4747;
 const BUDGET_MS = 2800; // reaching or starting the server may never hold the session up longer than this
 const LOCK = path.join(os.tmpdir(), `monkey-kitchen-${PORT}.lock`);
@@ -70,10 +72,6 @@ function slim(p) {
   return out;
 }
 
-// Claude Code can put <system-reminder> blocks before the user's own words; drop them so the clip keeps the real text.
-const REMINDER = /^<system-reminder(?:\s[^>]*)?>[\s\S]*?<\/system-reminder>/;
-function stripReminders(t) { t = t.trimStart(); let m; while ((m = REMINDER.exec(t))) t = t.slice(m[0].length).trimStart(); return t; }
-
 // Reads at most `max` characters of the answer: enough to recognise who is talking.
 // `withToken` adds the master token: only for a server that has just proved it holds it.
 function request(method, urlPath, body, timeout, max = 1e5, withToken = false) {
@@ -112,7 +110,7 @@ async function probe() {
   let info = null;
   try { info = JSON.parse(h.data); } catch { /* not a kitchen's health */ }
   if (h.kitchen || (h.status === 200 && info?.app === 'monkey-kitchen')) {
-    if (TOKEN && sameToken(h.proof, healthProof(TOKEN, c))) { proven = true; return { kind: 'kitchen', info }; }
+    if (TOKEN && sameToken(h.proof, healthProof(TOKEN, c))) { proven = true; provenV6 = info?.v6 === true; return { kind: 'kitchen', info }; }
     if (info?.app === 'monkey-kitchen' && olderVersion(info.version, FIRST_KEYED)) return { kind: 'old', info };
     return { kind: 'locked' };
   }
@@ -132,6 +130,9 @@ function takeLock() {
   return false;
 }
 const dropLock = () => { try { fs.unlinkSync(LOCK); } catch { /* gone */ } };
+// Set while this process holds the start lock. Dropped on exit too: the last-resort timer exits mid-wait, skipping finally.
+let holdingLock = false;
+process.on('exit', () => { if (holdingLock) dropLock(); });
 
 function startServer() {
   // cwd is the plugin root: on Windows a process locks its working folder, and the user's project must stay free.
@@ -172,16 +173,20 @@ async function relay(body, source) {
   // Only a refused connection means no server is running; a timeout or reset must not spawn another.
   if (p.kind !== 'refused') return p.kind;
   const mine = takeLock();
-  if (mine) startServer();
-  let r = 'refused';
-  while (left() > 250) {
-    await sleep(200);
-    const q = await probe();
-    if (q.kind === 'kitchen') { r = await post(body); if (r === 'ok' || r === 'locked') { if (mine) dropLock(); return r; } }
-    else if (q.kind === 'old') return 'legacy';
-    else if (q.kind !== 'refused' && q.kind !== 'fail') return q.kind;
-  }
-  return r;
+  holdingLock = mine;
+  // The lock is ours until this wait ends, however it ends: a start that failed must not hold up every hook for LOCK_MS.
+  try {
+    if (mine) startServer();
+    let r = 'refused';
+    while (left() > 250) {
+      await sleep(200);
+      const q = await probe();
+      if (q.kind === 'kitchen') { r = await post(body); if (r === 'ok' || r === 'locked') return r; }
+      else if (q.kind === 'old') return 'legacy';
+      else if (q.kind !== 'refused' && q.kind !== 'fail') return q.kind;
+    }
+    return r;
+  } finally { if (mine) { dropLock(); holdingLock = false; } }
 }
 
 setTimeout(() => process.exit(0), BUDGET_MS + 1500).unref(); // last resort if stdin or the network hangs
@@ -206,9 +211,10 @@ try {
     const rules = process.env.MONKEY_KITCHEN_ROUTING === 'off'
       ? 'The Monkey Kitchen plugin is showing this session in its kitchen view. Its routing rules are switched off here, so work as you normally would.'
       : fs.readFileSync(path.join(ROOT, 'brigade', 'head-chef.md'), 'utf8');
-    // The link carries the read-only page key, never the master token, and is given only for a kitchen that proved
-    // it holds our key (now, or earlier in this run when the last attempt then failed).
-    const link = `The live kitchen view is at http://localhost:${PORT}/?k=${PAGE} (this link unlocks the page in your browser; share it only with the user).`;
+    // The link is plain (the page needs no key), and is given only for a kitchen that proved it holds our key (now,
+    // or earlier in this run when the last attempt then failed). The host is 'localhost' only when that kitchen also
+    // listens on [::1]: else a browser trying ::1 first could reach another program there.
+    const link = `The live kitchen view is at http://${provenV6 ? 'localhost' : '127.0.0.1'}:${PORT}.`;
     const where = status === 'nokey'
       ? 'The kitchen view is unavailable: no key file could be created in your home folder.'
       : status === 'foreign'

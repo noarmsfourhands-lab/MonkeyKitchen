@@ -4,11 +4,11 @@
 // It writes a fake transcript to the temp folder so the "Tab so far" panel has numbers.
 
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveToken, pageKey } from '../server/token.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'hook.mjs');
 const FAST = process.argv.includes('--fast');
@@ -58,11 +58,23 @@ const REPORT = {
 const stop = c => send('SubagentStop', { ...c, last_assistant_message: REPORT[c.agent_id] });
 const tool = (who, tool_name, tool_input) => send('PreToolUse', { ...who, ...effort(who), tool_name, tool_input });
 
-// The keyed link (read-only page key): opening it once unlocks the kitchen page in that browser.
-const KEY = pageKey(resolveToken());
-console.log('Playing a demo service. Watch http://localhost:' + (process.env.MONKEY_KITCHEN_PORT || 4747) + (KEY ? '/?k=' + KEY : ''));
+// The plain link, as the hook gives it: its host is 'localhost' only when the kitchen says (/health v6) it also
+// listens on [::1].
+const PORT = Number(process.env.MONKEY_KITCHEN_PORT) || 4747;
+const v6 = () => new Promise(resolve => {
+  const req = http.get({ host: '127.0.0.1', port: PORT, path: '/health', agent: false, timeout: 1000 }, res => {
+    let data = '';
+    res.setEncoding('utf8');
+    res.on('data', d => { data += d; });
+    res.on('end', () => { try { resolve(JSON.parse(data).v6 === true); } catch { resolve(false); } });
+    res.on('error', () => resolve(false));
+  });
+  req.on('error', () => resolve(false));
+  req.on('timeout', () => { req.destroy(); resolve(false); });
+});
 
-send('SessionStart', { source: 'startup' });
+send('SessionStart', { source: 'startup' }); // starts the kitchen if none is running
+console.log(`Playing a demo service. Watch http://${(await v6()) ? 'localhost' : '127.0.0.1'}:${PORT}`);
 send('UserPromptSubmit', { prompt: 'Add a "banana of the day" card to the home page, backed by a new /api/banana endpoint, with tests.' });
 bill(transcript, 'claude-fable-5-2', 1800, 420, 21000, 3000);
 await sleep(1500);

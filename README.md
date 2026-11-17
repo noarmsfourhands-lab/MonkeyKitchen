@@ -7,7 +7,7 @@ No API key and no npm dependencies. It needs Node 18 or newer on your PATH as no
 ## What it does
 
 - **Routes work to the right cook, many at once.** At session start the plugin gives the Head Chef a short set of rules: which cook gets which kind of ticket, how to keep many tickets cooking in parallel, when to do the work itself, and when to escalate.
-- **Shows the kitchen.** Hooks forward session events to a small local server, and a page on http://localhost:4747 animates whoever is working. The page is locked to you: see [The key](#the-key).
+- **Shows the kitchen.** Hooks forward session events to a small local server, and a page on http://localhost:4747 animates whoever is working. Open that address in your browser; no key or link is needed (see [The key](#the-key) for what that means).
 - **Keeps a tab.** Token counts per model tier are read from the session transcripts and priced at API list prices, next to an estimate of the same tokens at the Head Chef's price.
 
 ## The brigade
@@ -51,7 +51,7 @@ The kitchen is a top-down pixel-art room. Each agent is a monkey that walks to t
 | Finished | Carries a plate to the pass, then goes back on break |
 | Waiting for your permission | The Head Chef waves at your table |
 
-A cook that has gone quiet for a long time dozes at its station and is shown as "quiet", not finished. The side panel "On the line" has a card per cook with its model, effort, elapsed time, ticket, steps and final report; hovering a monkey shows the same at a glance.
+A cook that has gone quiet for a long time dozes at its station and is shown as "quiet", not finished. A cook that stays silent for five times that long is shown as "lost" ("Never reported back"), and its monkey goes back on break. The side panel "On the line" has a card per cook with its model, effort, elapsed time, ticket, steps and final report; hovering a monkey shows the same at a glance.
 
 The Health Inspector patrols with a clipboard, a failed tool call smashes a plate, extra cooks of the same kind come in through the back door, and when the order is done the Head Chef rings the bell and your table gets its plate.
 
@@ -80,7 +80,7 @@ From GitHub, once published:
 
 For a single session while developing: `claude --plugin-dir /path/to/MonkeyKitchen`.
 
-Start a new session, then run `/monkey-kitchen:kitchen` (or ask the Head Chef for the kitchen link). You get a link of the form `http://localhost:4747/?k=<key>`. Open it once; from then on plain http://localhost:4747 works in that browser. The server starts when a session starts, and shuts itself down after twelve hours with no events and no page open.
+Start a new session, then open http://localhost:4747 in your browser. That is all: there is no key in the address and nothing to unlock. The Head Chef knows the address too, if you ask it (or run `/monkey-kitchen:kitchen`), and gives the same plain address. On a machine without IPv6 loopback it gives `http://127.0.0.1:4747` instead; use whichever it gives. Old links that carried a key (`/#k=...` or `/?k=...`) still open the page and drop the key from the address. The server starts when a session starts, and shuts itself down after twelve hours with no events and no page open.
 
 ## Try it without spending tokens
 
@@ -96,8 +96,8 @@ This plays a scripted service through the real hook relay, with a fake transcrip
 |---|---|
 | `MONKEY_KITCHEN_PORT` | Port for the server and page. Default `4747`. |
 | `MONKEY_KITCHEN_ROUTING=off` | Keep the visualization but don't give the Head Chef the routing rules. |
-| `MONKEY_KITCHEN_STALE_MS` | How long a cook can be silent before it is shown as quiet. Default 900000 (15 minutes). |
-| `MONKEY_KITCHEN_TOKEN` | The key, as 32 hex characters. When unset or not 32 hex characters, the key file is used (see [The key](#the-key)). |
+| `MONKEY_KITCHEN_STALE_MS` | How long a cook can be silent before it is shown as quiet. Five times that, it is shown as lost. Default 900000 (15 minutes). |
+| `MONKEY_KITCHEN_TOKEN` | The hooks' key, as 32 hex characters, used by the hooks and the server instead of the key file. When unset or not 32 hex characters, the key file is used (see [The key](#the-key)). |
 
 Edit `brigade/head-chef.md` to change the routing rules, `agents/*.md` to change a cook, and `server/pricing.json` to change prices.
 
@@ -105,21 +105,17 @@ A plugin installed from a local folder marketplace is read in place, so edits ta
 
 ## The key
 
-The server and the hooks share a secret key. It is kept in `~/.claude/monkey-kitchen/token`, created on first use and readable only by you on macOS and Linux. When `MONKEY_KITCHEN_TOKEN` holds 32 hex characters, that is used instead.
+The page needs no key: open http://localhost:4747 (or the address the Head Chef gives, which is the same, never with a key in it). The key is only between the hooks and the server. It is kept in `~/.claude/monkey-kitchen/token`, created on first use and readable only by you on macOS and Linux. When `MONKEY_KITCHEN_TOKEN` holds 32 hex characters, that is used instead.
 
-- Hooks send the key with every event, and only to a server that first proves it holds the same key. Another program sitting on the port gets nothing.
-- The page uses a second, read-only key derived from the first. At session start the Head Chef is given a link of the form `http://localhost:4747/?k=<page key>`. Opening it once sets a cookie in that browser, and from then on plain http://localhost:4747 works there. Run `/monkey-kitchen:kitchen` in a session to have the Head Chef give you the link.
-- The page key can only read. It cannot add events or stop the server, and the main key never appears in the link, the cookie, or the session transcript.
-- Without the key the page loads but shows "This kitchen is locked" and no session data. `/health` and the page's own files stay open.
-- With `MONKEY_KITCHEN_ROUTING=off` the session still gets the link; only the routing rules are left out.
+- The server takes events, and the request to shut down, only with the key. Other programs cannot add events to your kitchen or stop the server.
+- Hooks send the key with every event, and only to a server that first proves it holds the same key. Another program sitting on the port gets neither the key nor your session's events.
+- The key never appears in a link, in the page, in the session context or in any answer the server gives.
+- With `MONKEY_KITCHEN_ROUTING=off` the session still gets the address; only the routing rules are left out.
 
-What it protects, and what it does not:
+The trade-off: anything running on this machine that can reach the loopback address can read the kitchen view (your prompts, tool activity and the cooks' reports). Web pages cannot: the server answers only to its own address (127.0.0.1, localhost or [::1] with its port), sends no cross-origin headers, refuses posts from browsers, and listens on the loopback address only, so nothing on your network reaches it.
 
-- It stops other users on the machine, and other programs that cannot read your files. A program running as you can read the key file (and your transcripts) anyway.
-- The link contains the page key. Anyone who has it and can reach your machine's loopback address can read the kitchen, so do not paste it into public places.
-- Browser cookies for `localhost` are shared across ports, so other local web servers you visit can see the page key cookie. That is why it is read-only. A second kitchen on another port with a different key replaces the cookie.
-- On Windows the key folder's permissions are tightened to your account when it is created. On macOS and Linux the file is created readable only by you.
-- To change the key, delete `~/.claude/monkey-kitchen/token`. The next event creates a new one, the running server picks it up, and open pages lock until you open the new link.
+- On Windows the key folder's permissions are tightened to your account when the folder is created, and applied again each time the server starts. On macOS and Linux the file is created readable only by you.
+- To change the key, delete `~/.claude/monkey-kitchen/token`. The next event creates a new one and the running server picks it up. Open pages are not affected.
 
 ## Turn it off for one project
 
@@ -136,7 +132,7 @@ Claude Code ──hooks──▶ scripts/hook.mjs ──POST /hook──▶ serv
 
 - `hooks/hooks.json` registers ten hooks. All but `SessionStart` run in the background, and `PostToolUse` fires only for the Agent tool.
 - `scripts/hook.mjs` sends only the fields the kitchen uses, never file contents or command output, with the key. It stamps each event with an id and the time, starts the server when it is not running, replaces an older server after a plugin update, and always exits cleanly.
-- `server/server.mjs` keeps the state in memory and listens on `127.0.0.1` only. It pairs each ticket to its cook using the Agent tool's result, ignores late and duplicate events, and streams the watched session to the page. When the server restarts mid-session (a crash, a plugin update, the idle shutdown), the next event from that session makes it rebuild the current order and its cooks (ticket, steps, report) from the session's transcript files.
+- `server/server.mjs` keeps the state in memory and listens on the loopback address only (`127.0.0.1`, and `[::1]` when the machine has it). It pairs each ticket to its cook using the Agent tool's result, ignores late and duplicate events, and streams the watched session to the page. When the server restarts mid-session (a crash, a plugin update, the idle shutdown), the next event from that session makes it rebuild the current order and its cooks (ticket, steps, report) from the session's transcript files.
 - `server/usage.mjs` reads the session transcript and the subagent transcripts beside it, and prices each message by its model.
 
 `.claude-plugin/icon.png` is generated from the page's own pixel art by `node tools/make-icon.mjs`.
@@ -146,11 +142,11 @@ Claude Code ──hooks──▶ scripts/hook.mjs ──POST /hook──▶ serv
 - Prices are API list prices. On a subscription plan nothing is billed per token, so read the figures as relative weight.
 - Input and output prices are list prices per model. Cache-write prices and some cache-read prices in `server/pricing.json` are assumptions; its `note` field says which.
 - The "Head Chef alone" figure prices the same token counts at the main model's rate. A real solo run would use a different number of tokens, so treat it as a rough comparison.
-- Models not listed in `pricing.json` are priced at their tier's current rate.
+- A model missing from `pricing.json` is priced at its tier's current rate. A model whose id names none of the known families (Fable, Mythos, Opus, Sonnet, Haiku) is counted in tokens but priced at zero.
 
 ## Tests
 
-`npm test` runs the suite in `test/` (124 tests) with Node's built-in runner. It starts its own servers on random ports and needs no setup.
+`npm test` runs `node test/run.mjs`, which runs the suite in `test/` with Node's built-in runner. It works on Node 18 and newer and on Windows. It starts its own servers on random ports and needs no setup.
 
 `.github/workflows/test.yml` runs the suite on Windows, macOS and Linux with Node 18, 20, 22 and 24 on every push and pull request. Locally it has only been run on Windows with Node 24 so far.
 

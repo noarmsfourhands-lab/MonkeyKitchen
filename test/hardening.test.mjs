@@ -114,12 +114,13 @@ test('POST /hook answers carry x-monkey-kitchen: 1', async () => {
   assert.equal(junk.headers['x-monkey-kitchen'], '1', 'also for a body that is not JSON');
 });
 
-test('GET /health returns {ok, app, version, root} with the plugin.json version', async () => {
+test('GET /health returns {ok, app, version, root, v6} with the plugin.json version', async () => {
   const r = await k.request({ path: '/health' });
   assert.equal(r.status, 200);
   const h = JSON.parse(r.body);
   const version = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version;
-  assert.deepEqual(Object.keys(h).sort(), ['app', 'ok', 'root', 'version']);
+  assert.deepEqual(Object.keys(h).sort(), ['app', 'ok', 'root', 'v6', 'version']);
+  assert.equal(typeof h.v6, 'boolean');
   assert.equal(h.ok, true);
   assert.equal(h.app, 'monkey-kitchen');
   assert.equal(h.version, version);

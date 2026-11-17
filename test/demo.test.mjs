@@ -1,7 +1,7 @@
 // scripts/demo.mjs --fast against a test server.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startKitchen, runNode, DEMO, tempDir, rmDir } from './helpers/kitchen.mjs';
+import { startKitchen, runNode, DEMO, TEST_TOKEN, tempDir, rmDir } from './helpers/kitchen.mjs';
 
 let k;
 let dir;
@@ -14,6 +14,9 @@ test('demo --fast ends served, chef idle, every cook done with ticket, prompt, r
   assert.equal(r.code, 0, r.stderr);
   const sid = r.stdout.match(/Session id: (\S+)/)?.[1];
   assert.ok(sid, 'demo printed its session id');
+  // The link it prints is the plain address, with no key anywhere in what it prints.
+  assert.equal(r.stdout.split(/\r?\n/)[0], `Playing a demo service. Watch http://${await k.linkHost()}:${k.port}`);
+  assert.ok(!r.stdout.includes('k=') && !r.stdout.includes(TEST_TOKEN), 'no key in the demo output');
   // Tiers are stamped on the cooks when the transcripts are scanned, shortly after the last events.
   const s = await k.until(st => { const x = st.sessions.find(y => y.id === sid); return x?.usage?.tiers?.length && x.cooks.length && x.cooks.every(c => c.tier) && x; }, 8000);
   assert.ok(s, 'session with usage in /state');

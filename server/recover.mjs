@@ -218,7 +218,8 @@ async function readCook(file, size, mtimeMs, describe, now, promptAt) {
 }
 
 // promptOf(record) -> the order text of a real user prompt, or null; describe(tool, input) -> [kind, text].
-// Returns null, or { order: {text, at, served}, cooks: [...] } with cooks newest first.
+// Returns null, or { order: {text, at, served}, cooks: [...] } with cooks newest first. A cook's `guess` is true when
+// its 'done' rests on the quiet-file rule alone (no hand-back call, no returned Agent call, no peer hand-back).
 export async function readBack(transcriptPath, { promptOf, describe, now = Date.now() }) {
   let main;
   try { main = await readMain(transcriptPath, promptOf, now); } catch { return null; }
@@ -253,7 +254,8 @@ export async function readBack(transcriptPath, { promptOf, describe, now = Date.
       // A hand-back call in its own transcript is conclusive. A cook resumed after handing back is judged by its own
       // transcript alone: the main thread's record of the earlier hand-back is out of date.
       const mainSaysDone = (typeof meta.toolUseId === 'string' && main.returned.has(meta.toolUseId)) || main.handedBack.has(f.id);
-      const done = r.handedBack || (!r.resumed && mainSaysDone) || r.done;
+      const evidence = r.handedBack || (!r.resumed && mainSaysDone);
+      const done = evidence || r.done;
       const str = v => (typeof v === 'string' ? v : '');
       cooks.push({
         id: f.id,
@@ -262,6 +264,8 @@ export async function readBack(transcriptPath, { promptOf, describe, now = Date.
         prompt: str(call?.prompt) || r.firstPrompt,
         model: r.model, tools: r.tools, log: r.log, startedAt: r.startedAt, lastAt: f.mtimeMs,
         status: done ? 'done' : 'working', report: done ? r.lastText : '',
+        // Done only by the quiet-file rule, with no evidence it finished: it may still be at work.
+        guess: done && !evidence,
       });
     } catch { /* skip this cook */ }
     await tick();

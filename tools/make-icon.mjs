@@ -1,5 +1,5 @@
 // Generates .claude-plugin/icon.png: the Head Chef monkey from web/art.js,
-// scaled up with hard pixel edges on the page's cream background.
+// scaled up with hard pixel edges on an amber background (#f2b84b).
 // Node built-ins only. Run from anywhere: `node tools/make-icon.mjs`.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -86,7 +86,7 @@ const img = new Uint8Array(SIZE * SIZE * 4);
 const bg = parseColor(BG), ink = parseColor(art.INK);
 const put = (x, y, c) => { const i = (y * SIZE + x) * 4; img[i] = c[0]; img[i + 1] = c[1]; img[i + 2] = c[2]; img[i + 3] = 255; };
 
-// cream fill with a rounded INK frame inset from the edge (hard edges, no AA)
+// amber fill with a rounded INK frame inset from the edge (hard edges, no AA)
 const INSET = 40, THICK = 24, RAD = 120;
 const inRounded = (x, y, x0, y0, x1, y1, r) => {
   if (x < x0 || y < y0 || x > x1 || y > y1) return false;

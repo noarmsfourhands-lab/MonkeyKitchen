@@ -77,10 +77,13 @@ const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
 let reduced = motionQuery.matches;
 motionQuery.addEventListener('change', () => { reduced = motionQuery.matches; if (reduced) particles = []; });
 
-// A cook's status, with the old server's "done but stale" read as what it means: quiet, not finished.
+// A cook's status. A cook read back after a server restart whose 'done' is only a guess (`guess`: a quiet transcript,
+// no sign it finished) may still be at work, so until the server clears `guess` it counts as quiet: it dozes at its
+// station, no plate yet. A read-back cook with real evidence of finishing is an ordinary finished cook.
 // Anything unknown or missing counts as working: only an explicit 'done' earns a plate. 'lost' is a cook that
 // went quiet and never came back (an interrupt, say): ended, no plate.
-const statusOf = c => c.status === 'quiet' || (c.status === 'done' && c.stale) ? 'quiet' : c.status === 'done' || c.status === 'failed' || c.status === 'lost' ? c.status : 'working';
+const guessedDone = c => c.status === 'done' && c.guess === true;
+const statusOf = c => c.status === 'quiet' || guessedDone(c) ? 'quiet' : c.status === 'done' || c.status === 'failed' || c.status === 'lost' ? c.status : 'working';
 const endText = st => st === 'failed' ? 'Sent back' : st === 'lost' ? 'Never reported back' : 'Plated';
 const isBusy = c => { const st = statusOf(c); return st === 'working' || st === 'quiet'; };
 
@@ -183,7 +186,8 @@ function placeInOrder(box, els) {
 
 // Keeps a list of keyed rows patched in place (no rebuild, so scroll positions and open states survive).
 // make(item, key) returns { el, clamp? }; only rows that are out of place are moved.
-function patchList(box, items, keyOf, make) {
+// update(rec, item), when given, runs for every row, new or kept, to patch what can change after a row is made.
+function patchList(box, items, keyOf, make, update) {
   const m = box._rows || (box._rows = new Map()), seen = new Set(), els = [];
   for (const it of items) {
     let k = keyOf(it);
@@ -191,6 +195,7 @@ function patchList(box, items, keyOf, make) {
     seen.add(k);
     let rec = m.get(k);
     if (!rec) { rec = make(it, k); m.set(k, rec); }
+    if (update) update(rec, it);
     els.push(rec.el);
   }
   for (const [k, rec] of m) if (!seen.has(k)) { rec.el.remove(); m.delete(k); dropClamp(rec.clamp); }
@@ -434,6 +439,7 @@ function applyState(s) {
       lastOrderAt = o.startedAt; chalk = 0;
       if (!first) { plates = []; customerPlate = false; customer.say('!', 2); }
     }
+    if (o && o.status === 'stopped') plates = []; // a stopped order is cleared off the pass, as a reload would show it
     if (first) {
       // loading mid-order: one plate on the pass for each cook of this order that has already finished
       plates = [];
@@ -446,11 +452,16 @@ function applyState(s) {
       if (!isBusy(c)) continue;
       let e = byCook.get(c.id);
       if (!e) {
-        const r = residents.get(c.role) || residents.get('stagiaire');
-        if (!r.cook) e = r;
-        else { e = new Monkey(c.role, ...DOOR); e.temp = true; monkeys.push(e); }
+        // One cook, one monkey: a cook back at work while its monkey is still carrying its plate takes that monkey
+        // back (the new plan drops the plate), rather than a second monkey walking in for it.
+        e = monkeys.find(m => m.cook === c.id && !m.gone);
+        if (!e) {
+          const r = residents.get(c.role) || residents.get('stagiaire');
+          if (!r.cook) e = r;
+          else { e = new Monkey(c.role, ...DOOR); e.temp = true; monkeys.push(e); }
+          if (!instant) e.say('!', 1.2);
+        }
         e.cook = c.id; byCook.set(c.id, e);
-        if (!instant) e.say('!', 1.2);
       }
       e.label = cookName(c);
       e.task = c.activity || '';
@@ -708,8 +719,7 @@ function dialogTick(dt) {
   if (dialog.shown < dialog.text.length) {
     dialog.shown = reduced ? dialog.text.length : Math.min(dialog.text.length, dialog.shown + dt * 60);
     if (dialog.shown < dialog.text.length) dialogEl.textContent = dialog.text.slice(0, Math.floor(dialog.shown));
-    else if (dialogClamp.text === dialog.text) { dialogEl.textContent = dialog.text; dialogClamp.fit(); } // measured once, when typing is done
-    else dialogClamp.set(dialog.text);
+    else dialogClamp.set(dialog.text); // measured once, when typing is done
   } else if ((dialog.hold -= dt) <= 0 && dialog.queue.length) dialogShow(dialog.queue.shift());
 }
 
@@ -735,7 +745,7 @@ function whoName(f, cooks) {
   return types.size ? 'Guest' : ROLE.stagiaire.name;
 }
 
-// ---------- full ticket text: fetched on demand from the v2 server, cached per cook ----------
+// ---------- full ticket text: fetched on demand from the server, cached per cook ----------
 
 const details = new Map(); // cook id, or 'chef' -> { sig, data, state: 'loading' | 'ok' | 'error', next }
 const sq = () => 'session=' + encodeURIComponent(sessionId || '');
@@ -766,7 +776,7 @@ function loadDetail(key, d, url) {
 }
 
 // ---------- step logs: kept per cook (and for the chef) from every frame, open card or not ----------
-// A v2 frame carries only each cook's last 8 steps, so the page keeps its own log of the last LOG_CAP.
+// A frame carries only each cook's last 8 steps, so the page keeps its own log of the last LOG_CAP.
 // When a frame's oldest step is newer than everything kept (frames were missed), that is a gap: `gaps`
 // goes up, which changes the card's fetch signature, so an open card fetches the full log again.
 const LOG_CAP = 20;
@@ -777,12 +787,12 @@ function unionLog(a, b) {
   out.sort((x, y) => (x.t || 0) - (y.t || 0));
   return out.slice(-LOG_CAP);
 }
-function trackLog(key, recent, windowed) {
+function trackLog(key, recent) {
   recent = Array.isArray(recent) ? recent : [];
   let r = logs.get(key);
   if (!r) {
-    // a v2 window that is already full may be missing older steps
-    r = { log: unionLog(recent, []), gaps: 0, partial: windowed && recent.length >= 8, order: null };
+    // a frame's window that is already full may be missing older steps
+    r = { log: unionLog(recent, []), gaps: 0, partial: recent.length >= 8, order: null };
     logs.set(key, r);
     return r;
   }
@@ -860,7 +870,8 @@ function paintEnt(ent) {
   ent.main.setAttribute('aria-expanded', open);
   ent.body.hidden = !open;
   if (!open) { ent.logInit = false; return; }
-  let prompt = d.prompt, report = d.report, log = d.log || [], msg = '';
+  let prompt = '', report = '', msg = '';
+  const log = d.log || [];
   if (d.fetch) {
     const det = wantDetail(ent.id, d.sig, d.fetch);
     if (det.data) { prompt = det.data.prompt || ''; report = det.data.report || ''; } // the log itself is kept by trackLog
@@ -892,32 +903,32 @@ function tickEnts() {
 setInterval(tickEnts, 1000);
 
 function renderLine(s) {
-  const want = [], c = s.chef, o = s.order, v2 = feedV === 2;
+  const want = [], c = s.chef, o = s.order;
   // the chef's log starts over with each order
   const orderAt = (o && o.startedAt) || 0, prevChef = logs.get('chef');
   if (prevChef && prevChef.order !== orderAt) { logs.delete('chef'); details.delete('chef'); }
-  const chefLog = trackLog('chef', s.chefLog, v2); chefLog.order = orderAt;
+  const chefLog = trackLog('chef', s.chefLog); chefLog.order = orderAt;
   if (c && c.status && c.status !== 'idle') {
     const n = chefLog.log.length;
     want.push({ id: 'chef', name: 'Head Chef', ti: chefTier(s), effort: c.effort || '', state: c.status === 'waiting' ? 'waiting' : 'working', status: c.status,
-      ticket: '', act: c.activity || 'Thinking', log: chefLog.log, prompt: '', report: '',
-      fetch: v2 && sessionId ? '/chef?' + sq() : null, sig: orderAt + '|' + chefLog.gaps,
+      ticket: '', act: c.activity || 'Thinking', log: chefLog.log,
+      fetch: sessionId ? '/chef?' + sq() : null, sig: orderAt + '|' + chefLog.gaps,
       start: o && o.status === 'cooking' ? orderAt : 0, end: 0, steps: stepsText(n, chefLog.partial || n >= LOG_CAP) });
   }
   const cooks = Array.isArray(s.cooks) ? s.cooks : [];
   const present = new Set(cooks.map(x => x.id));
   for (const k of [...logs.keys()]) if (k !== 'chef' && !present.has(k)) logs.delete(k);
-  for (const x of cooks) trackLog(x.id, x.log, v2);
+  for (const x of cooks) trackLog(x.id, x.log);
   const fin = x => x.endedAt || x.startedAt || 0;
   const working = cooks.filter(isBusy).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
   const done = cooks.filter(x => !isBusy(x)).sort((a, b) => fin(b) - fin(a));
   for (const x of [...working, ...done].slice(0, 40)) {
-    const st = statusOf(x), busy = st === 'working' || st === 'quiet', old = typeof x.prompt === 'string', tl = logs.get(x.id);
+    const st = statusOf(x), busy = st === 'working' || st === 'quiet', tl = logs.get(x.id);
     want.push({
       id: x.id, name: cookName(x), ti: cookTier(x), effort: x.effort || '', state: st, status: st,
-      ticket: x.ticket || '', act: busy ? (x.activity || 'Getting started') : endText(st),
-      log: tl.log, prompt: old ? x.prompt : '', report: old ? x.report || '' : '',
-      fetch: old || !sessionId ? null : `/cook?${sq()}&id=${encodeURIComponent(x.id)}`, sig: `${x.promptLen}|${x.promptRev}|${x.reportLen}|${busy ? 0 : 1}|${tl.gaps}`, // promptRev: a corrected ticket of the same length
+      ticket: x.ticket || '', act: busy ? (x.activity || (guessedDone(x) ? 'Read back after a restart' : 'Getting started')) : endText(st),
+      log: tl.log,
+      fetch: sessionId ? `/cook?${sq()}&id=${encodeURIComponent(x.id)}` : null, sig: `${x.promptLen}|${x.promptRev}|${x.reportLen}|${busy ? 0 : 1}|${tl.gaps}`, // promptRev: a corrected ticket of the same length
       start: x.startedAt || 0, end: busy ? 0 : (x.endedAt || (st === 'lost' ? x.lastEventAt || x.startedAt || 0 : 0)), steps: stepsText(x.tools),
     });
   }
@@ -987,6 +998,15 @@ function updateAria(text) { // at most every few seconds, so a screen reader is 
     Math.max(0, 3000 - (Date.now() - ariaAt)));
 }
 
+// The tab's last line: what the same tokens would have cost at the Head Chef's model (soloCost), against what they
+// did cost. The brigade can be cheaper or dearer than that; about equal, or no soloCost, says nothing.
+function savingText(solo, cost) {
+  if (!(solo > 0) || !Number.isFinite(cost)) return '';
+  const pct = Math.round(100 * Math.abs(solo - cost) / solo);
+  if (Math.abs(solo - cost) < 0.0005 || !pct) return '';
+  return `Head Chef alone: <b>${money(solo)}</b>. ` + (cost < solo ? `Brigade saved <b>${pct}%</b>.` : `The brigade cost <b>${pct}%</b> more.`);
+}
+
 const renderPanels = s => batchClamps(() => paintPanels(s)); // every clamp that changed is measured once, at the end
 
 function paintPanels(s) {
@@ -995,7 +1015,8 @@ function paintPanels(s) {
   const cls = 'order ' + (o.status || '');
   if ($('order').className !== cls) $('order').className = cls;
   const okey = 'order:' + (o.startedAt || '');
-  if (orderClamp.key !== okey) { clampOpen.delete(orderClamp.key); orderClamp.key = okey; fitLater(orderClamp); } // a new order starts collapsed
+  // a new order starts collapsed; the fit is needed when its text is the same as the last one's, as set() then does nothing
+  if (orderClamp.key !== okey) { clampOpen.delete(orderClamp.key); orderClamp.key = okey; fitLater(orderClamp); }
   orderClamp.set(o.text || 'No order yet. Send one from Claude Code.');
   setText($('dropped'), s.dropped || 0);
 
@@ -1025,10 +1046,7 @@ function paintPanels(s) {
       <tr><td><i style="background:${TIER_COLOR[t.tier] || TIER_COLOR.other}"></i>${esc(TIER_LABEL[t.tier] || t.tier)}</td>
       <td>${fmt(t.input)}</td><td>${fmt(t.output)}</td><td>${fmt(t.cacheRead)}</td><td>${money(t.cost)}</td></tr>`).join('') +
       `<tr class="total"><td>Total</td><td>${fmt(tot.input)}</td><td>${fmt(tot.output)}</td><td>${fmt(tot.cacheRead)}</td><td>${money(tot.cost)}</td></tr>`);
-    const solo = Number(u.soloCost) || 0, saved = solo - (Number(tot.cost) || 0);
-    setHTML($('saving'), solo > 0 && saved > 0.0005
-      ? `Head Chef alone: <b>${money(solo)}</b>. Brigade saved <b>${Math.round(100 * saved / solo)}%</b>.`
-      : (solo > 0 ? 'No savings yet: everything ran at the Head Chef’s tier.' : ''));
+    setHTML($('saving'), savingText(Number(u.soloCost), Number(tot.cost)));
   } else {
     setHTML($('usage-body'), '<tr><td colspan="5" class="muted">Nothing cooked yet</td></tr>');
     setHTML($('saving'), '');
@@ -1037,8 +1055,10 @@ function paintPanels(s) {
   patchList($('feed'), feed.slice().reverse(), feedKey, (f, k) => {
     const li = document.createElement('li');
     li.className = f.fail ? 'fail' : '';
-    li.innerHTML = `<time>${esc(clockTime(f.t))}</time><div class="feed-text"><div><b>${esc(whoName(f, cooks))}</b> ${esc(f.text)}</div></div>`;
-    return { el: li, clamp: makeClamp(li.lastChild, 2, 'feed:' + k) }; // dirty until patchList measures all new rows together
+    li.innerHTML = `<time>${esc(clockTime(f.t))}</time><div class="feed-text"><div><b></b> ${esc(f.text)}</div></div>`;
+    return { el: li, who: li.querySelector('b'), clamp: makeClamp(li.lastChild, 2, 'feed:' + k) }; // dirty until patchList measures all new rows together
+  }, (rec, f) => { // the speaker is named again each time: a guest's cook may only be listed after its first line
+    if (setText(rec.who, whoName(f, cooks))) { rec.clamp.text = rec.clamp.el.textContent; rec.clamp.dirty = true; } // re-measured by patchList
   });
   if (clamps.size > 300) pruneClamps();
   updateAria(describeScene(s));
@@ -1086,7 +1106,7 @@ function hoverInfo(e) {
     if (c.startedAt) bits.push(mmss((busy ? nowMs() : (c.endedAt || (st === 'lost' && c.lastEventAt) || nowMs())) - c.startedAt));
     if (c.tools != null) bits.push(stepsText(c.tools));
     return { name: cookName(c), ti: cookTier(c), effort: c.effort || '', model: c.model || '', status: bits.join(' · '), ticket: c.ticket || '',
-      act: busy ? (c.activity || 'Getting started') : endText(st), log: (c.log || []).slice(-3) };
+      act: busy ? (c.activity || (guessedDone(c) ? 'Read back after a restart' : 'Getting started')) : endText(st), log: (c.log || []).slice(-3) };
   }
   const r = ROLE[e.role] || ROLE.stagiaire;
   return { name: r.name, ti: guessTier(e.role), status: 'On break', job: JOB[e.role] || '' };
@@ -1162,12 +1182,22 @@ canvas.addEventListener('click', ev => {
 });
 document.addEventListener('pointerdown', ev => { if (ev.pointerType === 'touch' && ev.target !== canvas) setHover(null); });
 
-// ---------- session picker + live connection ----------
-// Two feed shapes are understood. v1 (old server): { now, sessions: [full session objects] }.
-// v2: { v: 2, now, sessions: [summaries], session: <the watched session or null> }, where /events?session=<id>
-// picks the session and no id follows the most recently active one.
+// ---------- leftovers from keyed links ----------
+// The page needs no key. Versions before 0.3.3 linked to /#k=<page key> and kept the key in localStorage
+// ('mk-page'): both are removed on load, so an old link lands on the plain address and nothing stale is kept.
+// Other fragment parts are left as they are.
+function cleanOldKey() {
+  try { localStorage.removeItem('mk-page'); } catch (_) {}
+  const parts = location.hash.replace(/^#/, '').split('&').filter(Boolean), rest = parts.filter(p => !/^k=/i.test(p));
+  if (rest.length === parts.length) return;
+  try { history.replaceState(history.state, '', location.pathname + location.search + (rest.length ? '#' + rest.join('&') : '')); } catch (_) {}
+}
 
-let watching = null, feedV = 0, lastAll = null, es = null, connId = null, retryTimer = 0, pickSig = '';
+// ---------- session picker + live connection ----------
+// Frames: { v: 2, now, sessions: [summaries], session: <the watched session or null> }, where /events?session=<id>
+// picks the session and no id follows the most recently active one. Anything else is ignored.
+
+let watching = null, lastAll = null, es = null, connId = null, retryTimer = 0, pickSig = '';
 let connected = null, lastMsgAt = 0; // null: not known yet, so the first answer either way is painted
 
 // The frame lists only the most recent sessions, so the session being watched is kept as an option even
@@ -1209,44 +1239,23 @@ function pickLatest(list, now, serverPick, pinned) {
   return newest.id !== shown.id && still && (newest.lastEventAt || 0) > (shown.lastEventAt || 0) ? newest.id : shown.id;
 }
 
-// v1 sessions carry no lastEventAt: the newest timestamp anywhere in them stands in for it.
-function activityAt(s) {
-  let t = (s.order && s.order.startedAt) || 0;
-  const last = a => Array.isArray(a) && a.length ? a[a.length - 1].t || 0 : 0;
-  t = Math.max(t, last(s.feed), last(s.chefLog));
-  for (const c of s.cooks || []) t = Math.max(t, c.lastEventAt || 0, c.endedAt || 0);
-  return t;
-}
-
 function route(f) {
   const list = Array.isArray(f.sessions) ? f.sessions : [];
-  if (feedV === 2) {
-    const got = f.session && f.session.id ? f.session : null;
-    // a watched session that drops off the (top-N) list is still watched; only "no such session" ends it
-    if (watching && !got && connId === watching) { watching = null; $('session-pick').value = ''; }
-    updatePicker(list);
-    const target = watching || pickLatest(list, nowMs(), got && got.id, connId !== null);
-    if (target && (!got || got.id !== target) && connId !== target) { connect(target); return; }
-    if (!target && connId) { connect(null); return; }
-    applyState(got);
-    setTitle(titleFor(list, got));
-  } else {
-    // the old server sends whole sessions, so one that is not listed cannot be shown
-    const sums = list.map(x => ({ id: x.id, project: x.project, lastEventAt: activityAt(x), chefStatus: x.chef && x.chef.status }));
-    if (watching && !sums.some(x => x.id === watching)) { watching = null; $('session-pick').value = ''; }
-    updatePicker(sums);
-    const target = watching || pickLatest(sums, nowMs(), list[0] && list[0].id, false);
-    const s = list.find(x => x.id === target) || null;
-    applyState(s);
-    setTitle(titleFor(sums, s));
-  }
+  const got = f.session && f.session.id ? f.session : null;
+  // a watched session that drops off the (top-N) list is still watched; only "no such session" ends it
+  if (watching && !got && connId === watching) { watching = null; $('session-pick').value = ''; }
+  updatePicker(list);
+  const target = watching || pickLatest(list, nowMs(), got && got.id, connId !== null);
+  if (target && (!got || got.id !== target) && connId !== target) { connect(target); return; }
+  if (!target && connId) { connect(null); return; }
+  applyState(got);
+  setTitle(titleFor(list, got));
 }
 
 function onFrame(f) {
-  if (!f || typeof f !== 'object') return;
+  if (!f || typeof f !== 'object' || f.v !== 2) return; // not a frame this page understands
   if (typeof f.now === 'number') clockSkew = f.now - Date.now(); // only a fresh message moves the clock
   lastMsgAt = Date.now(); frozenNow = null; setConn(true);
-  feedV = f.v === 2 ? 2 : 1;
   lastAll = f;
   route(f);
 }
@@ -1274,7 +1283,7 @@ function connect(id) {
   connId = id || null;
   const src = new EventSource('/events' + (connId ? '?session=' + encodeURIComponent(connId) : ''));
   es = src;
-  src.onopen = () => { setLocked(false); setConn(true); };
+  src.onopen = () => setConn(true);
   src.onmessage = ev => {
     let f;
     try { f = JSON.parse(ev.data); } catch (err) { console.warn('Monkey Kitchen: unreadable snapshot', err); return; }
@@ -1283,47 +1292,10 @@ function connect(id) {
   src.onerror = () => {
     // an HTTP error closes an EventSource for good; anything else it retries by itself
     if (src.readyState !== EventSource.CLOSED) { setConn(false); return; }
-    // Closed by an HTTP error: a kitchen without our key (401) is locked, not down.
-    const retry = () => checkAuth().then(state => {
-      if (es !== src) return;
-      if (state === 'locked') { setLocked(true); retryTimer = setTimeout(retry, 5000); return; } // ask again, quietly
-      const wasLocked = locked;
-      setLocked(false);
-      if (state === 'ok' && wasLocked) { connect(connId); return; } // unlocked meanwhile (the link opened in another tab)
-      setConn(false);
-      retryTimer = setTimeout(() => { if (es === src) connect(connId); }, 3000);
-    });
-    retry();
+    // Closed by an HTTP error (a server restarting, say): open a new stream in a few seconds.
+    setConn(false);
+    retryTimer = setTimeout(() => { if (es === src) connect(connId); }, 3000);
   };
-}
-
-// 'ok', 'locked' (401 from /auth) or 'unknown' (no answer: the server is down or restarting).
-function checkAuth() {
-  return fetch('/auth', { cache: 'no-store', credentials: 'same-origin' })
-    .then(r => (r.status === 401 ? 'locked' : r.ok ? 'ok' : 'unknown'))
-    .catch(() => 'unknown');
-}
-
-// Locked: the scene stays dimmed with an explanation in place of the "Disconnected" banner. While locked the page
-// keeps asking, so opening the link in this browser (another tab) brings it in without a reload.
-let locked = false;
-function setLocked(on) {
-  if (on === locked) return;
-  locked = on;
-  const off = $('offline'), conn = $('conn');
-  off.classList.toggle('locked', on);
-  if (on) {
-    setConn(false); // dims the scene, stops the clocks and shows the banner, whose text is replaced here
-    conn.title = 'This kitchen is locked';
-    conn.setAttribute('aria-label', 'Locked');
-    off.textContent = 'This kitchen is locked. Open the link Claude Code gives you: run /monkey-kitchen:kitchen in your session.';
-    canvas.setAttribute('aria-label', 'Kitchen scene. This kitchen is locked.');
-  } else if (connected === false) {
-    // Back to plain "disconnected" until a frame arrives.
-    conn.title = 'Disconnected from the kitchen server';
-    conn.setAttribute('aria-label', 'Disconnected');
-    off.textContent = `Disconnected · last update ${lastMsgAt ? clockTime(lastMsgAt) : 'none yet'}`;
-  }
 }
 
 resetWorld();
@@ -1334,8 +1306,9 @@ watchDpr();
 $('session-pick').addEventListener('change', e => {
   watching = e.target.value || null;
   if (!lastAll) return;
-  if (feedV === 2) { const target = watching || pickLatest(lastAll.sessions || [], nowMs(), sessionId, connId !== null); if (target !== connId) connect(target); }
-  else { try { route(lastAll); } catch (err) { console.error('Monkey Kitchen: could not switch sessions', err); } } // re-shown from the last message; the clock offset stays as it was
+  const target = watching || pickLatest(lastAll.sessions || [], nowMs(), sessionId, connId !== null);
+  if (target !== connId) connect(target);
 });
 requestAnimationFrame(frame);
+cleanOldKey();
 connect(null);

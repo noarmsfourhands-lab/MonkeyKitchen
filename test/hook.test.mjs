@@ -59,7 +59,8 @@ test('with --context and MONKEY_KITCHEN_ROUTING=off: the rules are left out but 
   const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
   assert.ok(!ctx.includes('Rules of the pass'), 'no routing rules');
   assert.ok(ctx.includes('routing rules are switched off'), 'says routing is off');
-  assert.match(ctx, new RegExp(`The live kitchen view is at http://localhost:${k.port}/\\?k=[0-9a-f]{32}`), 'still carries the keyed link');
+  assert.equal(ctx.trimEnd().split('\n').pop(), `The live kitchen view is at http://${await k.linkHost()}:${k.port}.`, 'still carries the plain link');
+  assert.ok(!ctx.includes('k='), 'no key in the link');
 });
 
 test('with invalid JSON on stdin: exit 0 and nothing is posted', async () => {

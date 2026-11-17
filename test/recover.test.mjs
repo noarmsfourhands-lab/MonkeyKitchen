@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { startKitchen, tempDir, rmDir, sleep } from './helpers/kitchen.mjs';
+import { startKitchen, tempDir, rmDir, sleep, watch } from './helpers/kitchen.mjs';
 import { kitchenScene, writeJsonl, writeCook, userRec, assistantRecs, toolUse, text, age, subDir } from './helpers/transcripts.mjs';
 import { readBack } from '../server/recover.mjs';
 
@@ -266,6 +266,93 @@ test('a session that ended before its read-back landed gets its cooks finished a
   assert.equal(st.order.status, 'served');
 });
 
+test('guess: true only for a cook done by the quiet-file rule alone, in /state and in frames; a live event clears it', { timeout: 15000 }, async () => {
+  const { main, T } = scene();
+  // c3 and c4: no meta file, no Agent call, a text-only ending, settled: done by the quiet-file rule alone.
+  for (const id of ['c3', 'c4']) {
+    age(writeCook(main, id, [userRec(`${id} prompt`, T + 7000, { isSidechain: true }), ...assistantRecs([text(`${id} says done.`)], T + 8000, { model: 'claude-opus-5-5', sidechain: true })]), 60 * 1000);
+  }
+  // hb: handed back (its own SubagentHandback call), not settled: evidence, not a guess.
+  writeCook(main, 'hb', [
+    userRec('hb prompt', T + 7000, { isSidechain: true }),
+    ...assistantRecs([toolUse('h', 'SubagentHandback', { message: 'Handed back.' })], T + 8000, { model: 'claude-opus-5-5', sidechain: true }),
+  ]);
+  const s = k.kitchenSession();
+  await s.send('PreToolUse', { tool_name: 'Read', tool_input: {}, transcript_path: main });
+  let st = await recovered(s);
+  const by = id => st.cooks.find(c => c.id === id);
+  assert.equal(by('c1').status, 'done');
+  assert.equal(by('c1').guess, false, 'c1: its Agent call returned in the main transcript');
+  assert.equal(by('hb').status, 'done');
+  assert.equal(by('hb').guess, false, 'hb: its hand-back call');
+  assert.equal(by('c2').status, 'working');
+  assert.equal(by('c2').guess, false, 'a working cook is no guess');
+  for (const id of ['c3', 'c4']) { assert.equal(by(id).status, 'done'); assert.equal(by(id).guess, true, `${id}: quiet-file rule alone`); }
+  const w = watch(k.port, '/events?session=' + encodeURIComponent(s.id));
+  try {
+    const f = await w.next(fr => fr.session?.cooks?.length >= 5);
+    assert.ok(f, 'a frame');
+    assert.deepEqual(Object.fromEntries(f.session.cooks.map(c => [c.id, c.guess])), { c1: false, c2: false, c3: true, c4: true, hb: false });
+  } finally { w.close(); }
+  // A live SubagentStop settles it; a live tool event brings the cook back to work, no longer a guess.
+  await s.finish('c3', 'Explore', 'The real report.');
+  await s.tool('c4', 'Explore', 'Read', { file_path: 'more.txt' });
+  st = await s.get();
+  assert.equal(by('c3').status, 'done');
+  assert.equal(by('c3').guess, false);
+  assert.equal(by('c3').report, 'The real report.');
+  assert.equal(by('c4').status, 'working');
+  assert.equal(by('c4').guess, false);
+  // A cook first seen live never carries a guess.
+  await s.start('live1', LINE);
+  st = await s.get();
+  assert.equal(by('live1').guess, false);
+});
+
+// Late tool events (and a SubagentStart) from both rebuilt cooks: c1 was guessed done, c2 working.
+const lateEvents = async s => {
+  for (const [id, type] of [['c1', LINE], ['c2', TASTER]]) {
+    await s.tool(id, type, 'Read', { file_path: 'late.txt' });
+    await s.send('PostToolUse', { agent_id: id, agent_type: type, tool_name: 'Read', tool_input: {}, tool_response: {} });
+    await s.start(id, type);
+  }
+};
+const assertAllDone = (st, why) => {
+  for (const id of ['c1', 'c2']) {
+    const c = st.cooks.find(x => x.id === id);
+    assert.ok(c, `${id} on the rail (${why})`);
+    assert.equal(c.status, 'done', `${id} stays done (${why})`);
+    assert.ok(!c.log.some(e => e.text === 'Reading late.txt'), `${id}: the late step is not taken (${why})`);
+  }
+  assert.equal(st.chef.status, 'idle', why);
+};
+
+test('rebuilt cooks are finished for good at SessionEnd: late events, even after a resume, bring none back', async () => {
+  const { main } = scene();
+  const s = k.kitchenSession();
+  await s.send('PreToolUse', { tool_name: 'Read', tool_input: {}, transcript_path: main });
+  assert.ok(await recovered(s), 'precondition: read back');
+  await s.send('SessionEnd', { reason: 'exit', transcript_path: main });
+  await lateEvents(s);
+  assertAllDone(await s.get(), 'closed');
+  await s.send('SessionStart', { source: 'resume', transcript_path: main });
+  await lateEvents(s);
+  assertAllDone(await s.get(), 'after a resume');
+});
+
+test('cooks read back after the session ended are finished for good too', { timeout: 15000 }, async () => {
+  const { main } = scene();
+  const s = kd.kitchenSession();
+  await s.send('PreToolUse', { tool_name: 'Read', tool_input: {}, transcript_path: main });
+  await s.send('SessionEnd', { reason: 'exit', transcript_path: main });
+  assert.ok(await recovered(s, 5000, kd), 'precondition: read back after the end');
+  await lateEvents(s);
+  assertAllDone(await s.get(), 'closed');
+  await s.send('SessionStart', { source: 'resume', transcript_path: main });
+  await lateEvents(s);
+  assertAllDone(await s.get(), 'after a resume');
+});
+
 // ---------- rebuilt values follow the live limits ----------
 
 test('rebuilt agent types and models are clipped to 200 characters, as live ones are', async () => {
@@ -429,4 +516,37 @@ test('records that are shell-mode input or output, memory input or local command
   await s.send('PreToolUse', { tool_name: 'Read', tool_input: {}, transcript_path: main });
   const st = await recovered(s);
   assert.equal(st.order.text, 'The real order');
+});
+
+// ---------- a guess the sweep gives up on ----------
+
+test('the sweep clears guess on a cook silent for 5 x STALE (its transcript\'s last write counts), keeping it rebuilt', { timeout: 20000 }, async () => {
+  // 5 x STALE = 35 s. The quiet-file rule needs the cook file untouched for 30 s: aged 33 s, it is guessed done on
+  // read-back and the sweep gives the guess up about 2 s later.
+  const STALE = 7000;
+  const ks = await startKitchen({ MONKEY_KITCHEN_STALE_MS: String(STALE), MONKEY_KITCHEN_SWEEP_MS: '100' });
+  try {
+    const main = path.join(dir, 'guess-sweep-' + crypto.randomUUID() + '.jsonl');
+    const T = Date.now() - 40000;
+    writeJsonl(main, [userRec('An order whose cook went quiet', T)]);
+    age(writeCook(main, 'g1', [userRec('g1 prompt', T + 10, { isSidechain: true }), ...assistantRecs([text('g1 is done.')], T + 20, { model: 'claude-opus-5-5', sidechain: true })]), 5 * STALE - 2000);
+    const s = ks.kitchenSession();
+    await s.send('PreToolUse', { tool_name: 'Read', tool_input: {}, transcript_path: main });
+    const st = await recovered(s, 5000, ks);
+    const g = st.cooks.find(c => c.id === 'g1');
+    assert.equal(g.status, 'done');
+    assert.equal(g.guess, true, 'guessed on read-back');
+    const w = watch(ks.port, '/events?session=' + encodeURIComponent(s.id));
+    try {
+      await w.next(() => true); // the frame on connect
+      const f = await w.next(fr => fr.session?.cooks?.find(c => c.id === 'g1')?.guess === false, 6000, 1);
+      assert.ok(f, 'a frame with the guess cleared is broadcast');
+    } finally { w.close(); }
+    const after = await s.cook('g1');
+    assert.equal(after.guess, false);
+    assert.equal(after.status, 'done');
+    assert.equal(after.rebuilt, true, 'still rebuilt: a late live event can still revive it');
+    await s.tool('g1', '', 'Read', { file_path: 'late.txt' });
+    assert.equal((await s.cook('g1')).status, 'working', 'and one does');
+  } finally { await ks.stop(); }
 });

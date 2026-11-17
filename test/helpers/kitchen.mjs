@@ -9,7 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { pageKey, healthProof } from '../../server/token.mjs';
+import { healthProof } from '../../server/token.mjs';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const SERVER = path.join(ROOT, 'server', 'server.mjs');
@@ -23,7 +23,6 @@ export { sleep };
 
 // Every test server and hook child runs with this key, so no test reads or creates the user's real token file.
 export const TEST_TOKEN = '0123456789abcdef0123456789abcdef';
-export const TEST_PAGE = pageKey(TEST_TOKEN); // the read-only key the browser link and cookie carry
 // What a kitchen holding TEST_TOKEN answers to the hook's /health?c=<nonce> (null for a malformed nonce).
 export const proofFor = (url, token = TEST_TOKEN) => { try { return healthProof(token, new URL(url, 'http://x').searchParams.get('c')); } catch { return null; } };
 
@@ -57,7 +56,7 @@ export async function freePort() {
 // `extra` says otherwise; a key set to undefined in `extra` is removed.
 export function childEnv(extra = {}) {
   const env = { ...process.env };
-  for (const k of ['CLAUDE_PROJECT_DIR', 'MONKEY_KITCHEN_PORT', 'MONKEY_KITCHEN_STALE_MS', 'MONKEY_KITCHEN_SWEEP_MS', 'MONKEY_KITCHEN_ROUTING', 'MONKEY_KITCHEN_TOKEN', 'MONKEY_KITCHEN_RECOVER_DELAY_MS', 'MK_TEST_PIDFILE', 'MK_TEST_CWDFILE', 'NODE_TEST_CONTEXT', 'NODE_OPTIONS']) delete env[k];
+  for (const k of ['CLAUDE_PROJECT_DIR', 'MONKEY_KITCHEN_PORT', 'MONKEY_KITCHEN_STALE_MS', 'MONKEY_KITCHEN_SWEEP_MS', 'MONKEY_KITCHEN_ROUTING', 'MONKEY_KITCHEN_TOKEN', 'MONKEY_KITCHEN_RECOVER_DELAY_MS', 'MONKEY_KITCHEN_NO_V6', 'MK_TEST_PIDFILE', 'MK_TEST_CWDFILE', 'MK_TEST_STARTFILE', 'NODE_TEST_CONTEXT', 'NODE_OPTIONS']) delete env[k];
   const out = { ...env, MONKEY_KITCHEN_TOKEN: TEST_TOKEN, ...extra };
   for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
   return out;
@@ -76,6 +75,21 @@ export function request(port, { method = 'GET', path: p = '/', headers = {}, bod
     req.on('error', reject);
     req.setTimeout(10000, () => req.destroy(new Error('request timeout')));
     req.end(body);
+  });
+}
+
+// Only the status and headers of a GET (an event stream never ends): the connection is dropped once they arrive.
+// `token` as in request().
+export function peek(port, { path: p = '/', headers = {}, token = TEST_TOKEN } = {}) {
+  if (token) headers = { 'x-mk-token': token, ...headers };
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: p, headers, agent: false }, res => {
+      resolve({ status: res.statusCode, headers: res.headers });
+      res.on('error', () => {});
+      req.destroy();
+    });
+    req.on('error', reject); // after the answer a reset changes nothing
+    req.setTimeout(10000, () => req.destroy(new Error('request timeout')));
   });
 }
 
@@ -109,20 +123,22 @@ export async function startKitchen(env = {}, { server = SERVER } = {}) {
     child.stderr.on('data', d => { err += d; });
     const ok = await new Promise(resolve => {
       const t = setTimeout(() => resolve(false), 8000);
-      child.stdout.on('data', d => { out += d; if (out.includes(`http://localhost:${port}`)) { clearTimeout(t); resolve(true); } });
+      child.stdout.on('data', d => { out += d; if (new RegExp(`is open at http://(localhost|127\.0\.0\.1):${port}`).test(out)) { clearTimeout(t); resolve(true); } });
       child.once('exit', () => { clearTimeout(t); resolve(false); });
     });
     if (!ok) { await killChild(child); continue; }
-    return makeKitchen(port, child, () => err);
+    return makeKitchen(port, child, () => err, () => out);
   }
   throw new Error('could not start a kitchen server');
 }
 
-function makeKitchen(port, child, stderr) {
+// `stdout()` is everything the server printed so far (its startup line first).
+function makeKitchen(port, child, stderr, stdout) {
   const k = {
-    port, child, stderr,
+    port, child, stderr, stdout,
     stop: () => killChild(child),
     request: opts => request(port, opts),
+    peek: opts => peek(port, opts),
     async post(payload) {
       const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
       return request(port, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' }, body });
@@ -135,6 +151,8 @@ function makeKitchen(port, child, stderr) {
     async session(id) { return (await k.state()).sessions.find(s => s.id === id) || null; },
     async cook(sid, agentId) { return (await k.session(sid))?.cooks.find(c => c.id === agentId) || null; },
     async health() { return (await request(port, { path: '/health' })).status; },
+    // The host its links name: localhost when it also listens on [::1] (/health v6), else 127.0.0.1.
+    async linkHost() { return JSON.parse((await request(port, { path: '/health' })).body).v6 === true ? 'localhost' : '127.0.0.1'; },
     // Poll until fn(state) returns something truthy.
     async until(fn, ms = 5000, every = 100) {
       const end = Date.now() + ms;
@@ -236,12 +254,12 @@ export async function cleanupStrays(pidFiles, ports) {
   }
 }
 
-// A server-sent-events client: collects every parsed `data:` frame.
+// A server-sent-events client: collects every parsed `data:` frame. Like the page, it sends no key.
 export function watch(port, p = '/events', headers = {}) {
   const frames = [];
   const waiters = [];
   let res0 = null;
-  const req = http.get({ host: '127.0.0.1', port, path: p, agent: false, headers: { 'x-mk-token': TEST_TOKEN, ...headers } }, res => {
+  const req = http.get({ host: '127.0.0.1', port, path: p, agent: false, headers }, res => {
     res0 = res;
     let buf = '';
     res.setEncoding('utf8');

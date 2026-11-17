@@ -1,7 +1,9 @@
-// The kitchen's keys. The master token (header x-mk-token) is the only key that writes (/hook, /shutdown); the
-// read-only page key (cookie mk, header x-mk-page, the /?k= link) or the master token in its header reads the data
-// endpoints; /health and the page's files are open, and /health?c= proves the server holds the key. Then the token
-// file, its rotation, and the hook's side: it sends the key only to a kitchen that proved it holds it.
+// The kitchen's key. The page needs none: the data GETs (/events, /state, /cook, /chef) answer any request whose Host
+// names this server, and ignore any ?k=, x-mk-page header or cookie; a foreign Host is 403 and no CORS header is
+// sent. The master token (header x-mk-token) is the only key that writes (/hook, /shutdown), a POST with an Origin
+// header is 403, and /health?c= proves the server holds the key. An old /?k= link goes to /. Then the token file, its
+// rotation, and the hook's side: it sends the key only to a kitchen that proved it holds it, and links the plain
+// address. No response and no printed line ever carries the master token.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -12,9 +14,9 @@ import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  startKitchen, runNode, HOOK, ROOT, TEST_TOKEN, TEST_PAGE, proofFor, freePort, tempDir, rmDir, sleep, pidCaptureEnv, readPids, cleanupStrays,
+  startKitchen, runNode, HOOK, ROOT, TEST_TOKEN, proofFor, freePort, tempDir, rmDir, sleep, pidCaptureEnv, readPids, cleanupStrays, watch,
 } from './helpers/kitchen.mjs';
-import { pageKey, healthProof } from '../server/token.mjs';
+import { healthProof } from '../server/token.mjs';
 
 let k, dir;
 const servers = [], pidFiles = [];
@@ -34,57 +36,149 @@ const startupInput = sid => JSON.stringify({ session_id: sid, hook_event_name: '
 const lastLine = stdout => JSON.parse(stdout).hookSpecificOutput.additionalContext.trimEnd().split('\n').pop();
 const inHome = home => ({ MONKEY_KITCHEN_TOKEN: undefined, HOME: home, USERPROFILE: home });
 const tokenPath = home => path.join(home, '.claude', 'monkey-kitchen', 'token');
+const plainLink = (host, port) => `The live kitchen view is at http://${host}:${port}.`;
+// What 0.3.2 derived as the page key, and what 0.3.0/0.3.1 did: neither means anything now.
+const OLD_PAGE = hmac(TEST_TOKEN, 'monkey-kitchen page key v2').slice(0, 32);
+const OLDER_PAGE = hmac(TEST_TOKEN, 'monkey-kitchen page key').slice(0, 32);
 
-// Ways of asking that must not read: [label, request options without path].
-const NO_READ = [
+// Ways of asking for data. None is needed, and none changes the answer: every one reads.
+const READS = [
+  ['no key', { token: false }],
+  ['a wrong x-mk-token', { token: WRONG }],
+  ['the master token in x-mk-token', {}],
+  ['a wrong x-mk-page', { token: false, headers: { 'x-mk-page': WRONG } }],
+  ['the old page key as x-mk-page', { token: false, headers: { 'x-mk-page': OLD_PAGE } }],
+  ['a cookie', { token: false, headers: { cookie: `other=1; mk=${OLD_PAGE}` } }],
+  ['a wrong cookie', { token: false, headers: { cookie: `mk=${WRONG}` } }],
+];
+// The same, with ?k= on the URL (a wrong one, the old page key, the master token, an empty one).
+const QUERY_KEYS = [WRONG, OLD_PAGE, OLDER_PAGE, TEST_TOKEN, ''];
+const withQuery = (p, v) => `${p}${p.includes('?') ? '&' : '?'}k=${encodeURIComponent(v)}`;
+
+// Ways of asking that must not write: everything but the master token in x-mk-token.
+const NO_WRITE = [
   ['no key', { token: false }],
   ['a wrong master token', { token: WRONG }],
   ['a short key', { token: 'abc' }],
   ['an empty key', { token: false, headers: { 'x-mk-token': '' } }],
+  ['the master token in capitals', { token: TEST_TOKEN.toUpperCase() }],
   ['the master token as cookie', { token: false, headers: { cookie: `mk=${TEST_TOKEN}` } }],
   ['the master token as x-mk-page', { token: false, headers: { 'x-mk-page': TEST_TOKEN } }],
-  ['the page key as x-mk-token', { token: TEST_PAGE }],
-  ['a wrong cookie', { token: false, headers: { cookie: `mk=${WRONG}` } }],
+  ['the old page key as x-mk-token', { token: OLD_PAGE }],
+  ['the old page key as x-mk-page', { token: false, headers: { 'x-mk-page': OLD_PAGE } }],
 ];
-// Ways of asking that read.
-const READ = [
-  ['the master token in x-mk-token', {}],
-  ['the page key as cookie', { token: false, headers: { cookie: `other=1; mk=${TEST_PAGE}` } }],
-  ['the page key as x-mk-page', { token: false, headers: { 'x-mk-page': TEST_PAGE } }],
-];
-// Ways of asking that must not write: every NO_READ way, and the page key however it is sent.
-const NO_WRITE = [
-  ...NO_READ,
-  ['the page key as cookie', { token: false, headers: { cookie: `mk=${TEST_PAGE}` } }],
-  ['the page key as x-mk-page', { token: false, headers: { 'x-mk-page': TEST_PAGE } }],
-];
+// A Set-Cookie for mk that is anything but the removal of the old cookie.
+const keyCookies = r => [].concat(r.headers['set-cookie'] || []).filter(c => /^\s*mk=/i.test(c) && !/^\s*mk=;\s*Max-Age=0;\s*Path=\/$/i.test(c));
+const corsHeaders = r => Object.keys(r.headers).filter(h => h.startsWith('access-control-'));
 
-test('the page key is HMAC-SHA256(token, "monkey-kitchen page key") cut to 32 hex, and differs from the token', () => {
-  assert.equal(TEST_PAGE, hmac(TEST_TOKEN, 'monkey-kitchen page key').slice(0, 32));
-  assert.match(TEST_PAGE, /^[0-9a-f]{32}$/);
-  assert.notEqual(TEST_PAGE, TEST_TOKEN);
-});
-
-test('GET /events, /state, /cook and /chef: 401 {error: "locked"} unless read access is shown', async () => {
+// A session with an order and a cook, and the four data paths for it.
+async function seeded(text) {
   const s = k.kitchenSession();
-  await s.prompt('secret order');
+  await s.prompt(text);
   await s.start('a1', 'monkey-kitchen:line-cook');
   const q = 'session=' + encodeURIComponent(s.id);
-  const paths = [`/events?${q}`, '/state', `/cook?${q}&id=a1`, `/chef?${q}`];
-  for (const p of paths) {
-    for (const [what, opts] of NO_READ) {
+  return { s, q, json: ['/state', `/cook?${q}&id=a1`, `/chef?${q}`], events: `/events?${q}` };
+}
+
+test('GET /state, /cook and /chef answer 200 with the data and no key; a key, a cookie or ?k= changes nothing', async () => {
+  const { json } = await seeded('open order');
+  for (const p of json) {
+    for (const [what, opts] of READS) {
       const r = await k.request({ path: p, ...opts });
-      assert.equal(r.status, 401, `${p} with ${what}`);
-      assert.deepEqual(JSON.parse(r.body), { error: 'locked' }, `${p} body with ${what}`);
-      assert.ok(!r.body.includes('secret order'));
+      assert.equal(r.status, 200, `${p} with ${what}`);
+      assert.match(r.headers['content-type'], /^application\/json/);
     }
+    for (const v of QUERY_KEYS) assert.equal((await k.request({ path: withQuery(p, v), token: false })).status, 200, `${p} with ?k=`);
   }
-  for (const p of paths.filter(x => !x.startsWith('/events'))) {
-    for (const [what, opts] of READ) assert.equal((await k.request({ path: p, ...opts })).status, 200, `${p} with ${what}`);
+  const st = await k.request({ path: '/state', token: false });
+  assert.ok(st.body.includes('open order'), 'the data itself, with no key');
+  const cook = JSON.parse((await k.request({ path: json[1], token: false })).body);
+  assert.equal(cook.id, 'a1');
+});
+
+test('GET /cook and /chef for something that does not exist are 404, never 401', async () => {
+  const { q } = await seeded('missing order');
+  for (const p of [`/cook?${q}&id=nobody`, '/cook', `/chef?session=no-such-${crypto.randomUUID()}`, '/chef']) {
+    const r = await k.request({ path: p, token: false });
+    assert.equal(r.status, 404, p);
   }
 });
 
-test('POST /hook takes only the master token in x-mk-token: anything else, the page key included, is 401 and not processed', async () => {
+test('GET /events opens a stream with no key and sends frames; ?k=, x-mk-page and cookies are ignored', async () => {
+  const { s, events } = await seeded('stream order');
+  for (const [what, opts] of READS) {
+    const r = await k.peek({ path: events, ...opts });
+    assert.equal(r.status, 200, `/events with ${what}`);
+    assert.match(r.headers['content-type'], /^text\/event-stream/);
+  }
+  for (const v of QUERY_KEYS) assert.equal((await k.peek({ path: withQuery(events, v), token: false })).status, 200, '/events with ?k=');
+  assert.equal((await k.peek({ path: '/events', token: false })).status, 200, 'without a session too');
+  const w = watch(k.port, events);
+  try {
+    const f = await w.next(x => x.session?.id === s.id && x.session.order?.text === 'stream order');
+    assert.ok(f, 'a frame for the session, read with no key');
+  } finally { w.close(); }
+});
+
+test('a foreign Host is 403 on every GET, even with the master token; our three hosts are accepted', async () => {
+  const { json, events } = await seeded('host order');
+  const foreign = [`evil.example:${k.port}`, `127.0.0.1:${k.port + 1}`, `localhost.evil.example:${k.port}`, `[::2]:${k.port}`, '127.0.0.1'];
+  for (const host of foreign) {
+    for (const p of [...json, events, '/', '/kitchen.js', '/health', '/?k=x']) {
+      for (const token of [false, TEST_TOKEN]) {
+        const r = await k.request({ path: p, token, headers: { host } });
+        assert.equal(r.status, 403, `${p} with Host ${host}`);
+        assert.ok(!r.body.includes('host order'));
+      }
+    }
+  }
+  // An empty Host, and none at all (HTTP/1.0), sent by hand: Node's own client would fill in a default.
+  for (const head of ['GET /state HTTP/1.1\r\nHost: \r\nConnection: close', 'GET /state HTTP/1.0']) {
+    const answer = await new Promise((resolve, reject) => {
+      let data = '';
+      const sock = net.connect(k.port, '127.0.0.1', () => sock.write(head + '\r\n\r\n'));
+      sock.setEncoding('utf8');
+      sock.on('data', d => { data += d; });
+      sock.on('end', () => resolve(data));
+      sock.on('error', reject);
+      sock.setTimeout(5000, () => { sock.destroy(); resolve(data); });
+    });
+    assert.match(answer, /^HTTP\/1\.[01] (400|403) /, JSON.stringify(head));
+    assert.ok(!answer.includes('host order'));
+  }
+  for (const host of [`127.0.0.1:${k.port}`, `localhost:${k.port}`, `LOCALHOST:${k.port}`, `[::1]:${k.port}`]) {
+    assert.equal((await k.request({ path: '/state', token: false, headers: { host } })).status, 200, `Host ${host}`);
+  }
+});
+
+test('no CORS headers on any answer, whatever Origin a request names', async () => {
+  const { json, events } = await seeded('cors order');
+  for (const origin of ['http://evil.example', 'null', `http://localhost:${k.port}`]) {
+    for (const p of [...json, '/', '/health']) {
+      const r = await k.request({ path: p, token: false, headers: { origin } });
+      assert.deepEqual(corsHeaders(r), [], `${p} from ${origin}`);
+    }
+    assert.deepEqual(corsHeaders(await k.peek({ path: events, token: false, headers: { origin } })), [], `/events from ${origin}`);
+  }
+  // A preflight is not answered either.
+  const pre = await k.request({ method: 'OPTIONS', path: '/state', token: false, headers: { origin: 'http://evil.example', 'access-control-request-method': 'GET' } });
+  assert.equal(pre.status, 405);
+  assert.deepEqual(corsHeaders(pre), []);
+});
+
+test('other methods on the data paths are 405', async () => {
+  for (const method of ['PUT', 'DELETE', 'PATCH']) {
+    for (const p of ['/state', '/events', '/cook', '/chef']) assert.equal((await k.request({ method, path: p, token: false, body: '' })).status, 405, `${method} ${p}`);
+  }
+});
+
+test('GET /auth is gone (404)', async () => {
+  for (const opts of [{ token: false }, {}, { token: false, headers: { 'x-mk-page': OLD_PAGE } }]) {
+    assert.equal((await k.request({ path: '/auth', ...opts })).status, 404);
+  }
+});
+
+test('POST /hook takes only the master token in x-mk-token: anything else is 401 and not processed', async () => {
   for (const [what, opts] of NO_WRITE) {
     const sid = 'locked-hook-' + crypto.randomUUID();
     const r = await k.request({ method: 'POST', path: '/hook', body: ev(sid), ...opts, headers: { 'content-type': 'application/json', ...opts.headers } });
@@ -92,9 +186,27 @@ test('POST /hook takes only the master token in x-mk-token: anything else, the p
     assert.equal(r.headers['x-monkey-kitchen'], '1', `kitchen header with ${what}`);
     assert.equal(await k.session(sid), null, `not processed with ${what}`);
   }
+  // Nor does a key in the query.
+  for (const key of [TEST_TOKEN, OLD_PAGE]) {
+    const sid = 'qk-' + crypto.randomUUID();
+    assert.equal((await k.request({ method: 'POST', path: `/hook?k=${key}`, token: false, body: ev(sid) })).status, 401, 'POST /hook?k=');
+    assert.equal(await k.session(sid), null, 'not processed');
+  }
   const sid = 'open-hook-' + crypto.randomUUID();
   assert.equal((await k.post(ev(sid))).status, 204, 'control: with the master token');
   assert.ok(await k.session(sid));
+});
+
+test('POST /hook and /shutdown with an Origin header are 403, the master token notwithstanding', async () => {
+  for (const origin of ['http://evil.example', `http://localhost:${k.port}`, 'null']) {
+    const sid = 'origin-' + crypto.randomUUID();
+    const r = await k.request({ method: 'POST', path: '/hook', body: ev(sid), headers: { 'content-type': 'application/json', origin } });
+    assert.equal(r.status, 403, `/hook from ${origin}`);
+    assert.equal(await k.session(sid), null, 'not processed');
+    assert.equal((await k.request({ method: 'POST', path: '/shutdown', body: '{}', headers: { origin } })).status, 403, `/shutdown from ${origin}`);
+  }
+  await sleep(200);
+  assert.equal(k.child.exitCode, null, 'still running');
 });
 
 test('POST /shutdown takes only the master token: anything else is 401 and the server stays up', async () => {
@@ -103,47 +215,71 @@ test('POST /shutdown takes only the master token: anything else is 401 and the s
     assert.equal(r.status, 401, what);
     assert.equal(r.headers['x-monkey-kitchen'], '1');
   }
+  for (const key of [TEST_TOKEN, OLD_PAGE]) assert.equal((await k.request({ method: 'POST', path: `/shutdown?k=${key}`, token: false, body: '{}' })).status, 401);
   await sleep(200);
   assert.equal(k.child.exitCode, null, 'still running');
   assert.equal(await k.health(), 200);
 });
 
-test('GET /?k=<page key> sets the page-key cookie and redirects; the master token or a wrong k is 401 and sets nothing', async () => {
-  const r = await k.request({ path: `/?k=${TEST_PAGE}`, token: false });
-  assert.equal(r.status, 302);
-  assert.equal(r.headers.location, '/');
-  const cookie = [].concat(r.headers['set-cookie'] || []);
-  assert.deepEqual(cookie, [`mk=${TEST_PAGE}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`]);
-  assert.ok(!cookie[0].includes(TEST_TOKEN), 'the cookie never holds the master token');
-  const jar = cookie[0].split(';')[0];
-  assert.equal((await k.request({ path: '/state', token: false, headers: { cookie: jar } })).status, 200, 'the cookie reads');
-  assert.equal((await k.request({ method: 'POST', path: '/hook', token: false, headers: { cookie: jar }, body: ev('jar') })).status, 401, 'and does not write');
-  for (const bad of [TEST_TOKEN, WRONG, '', 'nope', TEST_PAGE.toUpperCase()]) {
-    const w = await k.request({ path: `/?k=${encodeURIComponent(bad)}`, token: false });
-    assert.equal(w.status, 401, `k=${bad === TEST_TOKEN ? '<master token>' : bad}`);
-    assert.match(w.headers['content-type'], /^text\/plain/);
-    assert.match(w.body, /does not unlock/);
-    assert.equal(w.headers['set-cookie'], undefined, 'no cookie');
+test('an old GET /?k=<anything> link goes to / (no fragment, no key); uncached, no referrer, old cookie cleared', async () => {
+  for (const v of [OLD_PAGE, OLDER_PAGE, TEST_TOKEN, WRONG, OLD_PAGE.toUpperCase(), 'nope', '', 'a%20b%0D%0Ax']) {
+    const label = v === TEST_TOKEN ? '<master key>' : v;
+    const r = await k.request({ path: `/?k=${v}`, token: false });
+    assert.equal(r.status, 302, `k=${label}`);
+    assert.equal(r.headers.location, '/', `k=${label}`);
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    assert.deepEqual([].concat(r.headers['set-cookie'] || []), ['mk=; Max-Age=0; Path=/'], 'the old cookie is cleared, no key cookie set');
   }
 });
 
-test('GET /auth is {ok: true} with read access, else 401 {ok: false}', async () => {
-  for (const [what, opts] of READ) {
-    const r = await k.request({ path: '/auth', ...opts });
-    assert.equal(r.status, 200, what);
-    assert.deepEqual(JSON.parse(r.body), { ok: true });
+test('GET / removes the cookie earlier versions set; no response sets a key cookie', async () => {
+  const home = await k.request({ path: '/', token: false, headers: { cookie: `mk=${OLD_PAGE}` } });
+  assert.equal(home.status, 200);
+  assert.deepEqual([].concat(home.headers['set-cookie'] || []), ['mk=; Max-Age=0; Path=/']);
+  const { json, events } = await seeded('cookie order');
+  const asks = [
+    ...['/', '/index.html', '/kitchen.js', '/health', `/health?c=${'a'.repeat(32)}`, ...json, '/nope', `/?k=${OLD_PAGE}`]
+      .flatMap(p => [{ path: p }, { path: p, token: false }, { path: p, token: false, headers: { cookie: `mk=${OLD_PAGE}` } }]),
+    { method: 'POST', path: '/hook', body: ev('ck-' + crypto.randomUUID()) },
+    { method: 'POST', path: '/hook', token: false, body: ev('ck-' + crypto.randomUUID()) },
+  ];
+  for (const a of asks) assert.deepEqual(keyCookies(await k.request(a)), [], `${a.method || 'GET'} ${a.path}`);
+  for (const a of [{ path: events }, { path: events, token: false }]) assert.deepEqual(keyCookies(await k.peek(a)), [], a.path);
+});
+
+test('no response, header or body, ever carries the master token', async () => {
+  const { json, events } = await seeded(`token order ${crypto.randomUUID()}`);
+  const asks = [
+    ...['/', '/index.html', '/kitchen.js', '/art.js', '/kitchen.css', '/health', `/health?c=${crypto.randomBytes(16).toString('hex')}`, ...json, '/auth', '/nope', `/?k=${TEST_TOKEN}`, `/state?k=${TEST_TOKEN}`]
+      .flatMap(p => [{ path: p }, { path: p, token: false }]),
+    { method: 'POST', path: '/hook', body: ev('tk-' + crypto.randomUUID()) },
+    { method: 'POST', path: '/hook', token: false, body: ev('tk-' + crypto.randomUUID()) },
+    { method: 'POST', path: '/shutdown', token: WRONG, body: '{}' },
+    { path: '/state', headers: { host: `evil.example:${k.port}` } },
+  ];
+  for (const a of asks) {
+    const r = await k.request(a);
+    assert.ok(!r.body.includes(TEST_TOKEN) && !JSON.stringify(r.headers).includes(TEST_TOKEN), `${a.method || 'GET'} ${a.path}`);
   }
-  for (const [what, opts] of NO_READ) {
-    const r = await k.request({ path: '/auth', ...opts });
-    assert.equal(r.status, 401, what);
-    assert.deepEqual(JSON.parse(r.body), { ok: false });
-  }
+  assert.ok(!JSON.stringify((await k.peek({ path: events, token: false })).headers).includes(TEST_TOKEN));
+  const w = watch(k.port, events);
+  try {
+    assert.ok(await w.next(() => true), 'a frame arrived');
+    assert.ok(!JSON.stringify(w.frames).includes(TEST_TOKEN), 'not in a frame');
+  } finally { w.close(); }
+});
+
+test('the server\'s startup line is the plain link, with no key', async () => {
+  const line = k.stdout().split(/\r?\n/)[0];
+  assert.equal(line, `Monkey Kitchen is open at http://${await k.linkHost()}:${k.port}`);
+  assert.ok(!k.stdout().includes('k=') && !k.stdout().includes(TEST_TOKEN));
 });
 
 test('GET /health and the page\'s own files are served without a key', async () => {
   const h = await k.request({ path: '/health', token: false });
   assert.equal(h.status, 200);
-  assert.deepEqual(Object.keys(JSON.parse(h.body)).sort(), ['app', 'ok', 'root', 'version']);
+  assert.deepEqual(Object.keys(JSON.parse(h.body)).sort(), ['app', 'ok', 'root', 'v6', 'version']);
   for (const p of ['/', '/index.html', '/kitchen.js', '/art.js', '/kitchen.css']) {
     const r = await k.request({ path: p, token: false });
     assert.equal(r.status, 200, p);
@@ -184,19 +320,20 @@ test('without MONKEY_KITCHEN_TOKEN the key lives in <home>/.claude/monkey-kitche
       assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'token file is 0600');
       assert.equal(fs.statSync(path.dirname(file)).mode & 0o077, 0, 'its folder is closed to others');
     }
-    assert.equal((await kk.request({ path: '/state', token: t1 })).status, 200, 'the server uses the file key');
-    assert.equal((await kk.request({ path: '/state' })).status, 401, 'and not the test key');
-    // The hook, with the same home, finds the same key: its event gets in and its link carries the page key.
+    assert.equal((await kk.request({ method: 'POST', path: '/hook', token: t1, body: ev('fk-' + crypto.randomUUID()) })).status, 204, 'the server uses the file key');
+    assert.equal((await kk.request({ method: 'POST', path: '/hook', body: ev('fk-' + crypto.randomUUID()) })).status, 401, 'and not the test key');
+    assert.ok(!kk.stdout().includes(t1), 'the startup line has no key');
+    // The hook, with the same home, finds the same key: its event gets in, and its link is the plain address.
     const sid = 'filekey-' + crypto.randomUUID();
     const r = await runNode([HOOK, '--context'], { input: startupInput(sid), env: { ...inHome(home), MONKEY_KITCHEN_PORT: String(kk.port) } });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(lastLine(r.stdout).includes(`/?k=${pageKey(t1)} `));
+    assert.equal(lastLine(r.stdout), plainLink(await kk.linkHost(), kk.port));
     assert.ok(!r.stdout.includes(t1), 'the master token is not in the context');
-    assert.ok(JSON.parse((await kk.request({ path: '/state', token: t1 })).body).sessions.some(s => s.id === sid), 'the hook\'s event arrived');
+    assert.ok(JSON.parse((await kk.request({ path: '/state', token: false })).body).sessions.some(s => s.id === sid), 'the hook\'s event arrived');
     await kk.stop();
     kk = await startKitchen(inHome(home));
     assert.equal(fs.readFileSync(file, 'utf8').trim(), t1, 'the next start reuses the file');
-    assert.equal((await kk.request({ path: '/state', token: t1 })).status, 200);
+    assert.equal((await kk.request({ method: 'POST', path: '/hook', token: t1, body: ev('fk-' + crypto.randomUUID()) })).status, 204);
   } finally { await kk?.stop(); rmDir(home); }
 });
 
@@ -242,32 +379,36 @@ test('the token file: an unreadable one is never deleted, uppercase hex is accep
   } finally { rmDir(home); }
 });
 
-test('a replaced key file is adopted by the running server: the next hook proves, posts and links the new page key', { timeout: 30000 }, async () => {
+test('a replaced key file is adopted by the running server: the next hook proves and posts, the old key no longer writes, open pages keep their stream', { timeout: 30000 }, async () => {
   const home = tempDir('mk-rotate-');
   const file = tokenPath(home);
-  let kk;
+  let kk, w;
   try {
     kk = await startKitchen(inHome(home));
     const t1 = fs.readFileSync(file, 'utf8').trim();
+    w = watch(kk.port, '/events'); // a page open before the rotation
+    assert.ok(await w.next(() => true), 'the page is connected');
     fs.unlinkSync(file); // the user rotates the key: the next hook creates a new one
     const sid = 'rotated-' + crypto.randomUUID();
     const r = await runNode([HOOK, '--context'], { input: startupInput(sid), env: { ...inHome(home), MONKEY_KITCHEN_PORT: String(kk.port) } });
     assert.equal(r.code, 0, r.stderr);
     const t2 = fs.readFileSync(file, 'utf8').trim();
     assert.notEqual(t2, t1);
-    assert.equal(lastLine(r.stdout), `The live kitchen view is at http://localhost:${kk.port}/?k=${pageKey(t2)} (this link unlocks the page in your browser; share it only with the user).`);
-    assert.equal((await kk.request({ path: '/state', token: t1 })).status, 401, 'the old key no longer reads');
-    assert.equal((await kk.request({ path: '/state', token: false, headers: { cookie: `mk=${pageKey(t1)}` } })).status, 401, 'nor the old page key');
-    const st = await kk.request({ path: '/state', token: t2 });
-    assert.equal(st.status, 200, 'the new key does');
+    assert.equal(lastLine(r.stdout), plainLink(await kk.linkHost(), kk.port));
+    assert.ok(!r.stdout.includes(t1) && !r.stdout.includes(t2), 'no key in the context');
+    assert.ok(await w.next(f => f.sessions.some(s => s.id === sid)), 'the page opened before the rotation sees the new event');
+    assert.equal((await kk.request({ method: 'POST', path: '/hook', token: t1, body: ev('old-' + crypto.randomUUID()) })).status, 401, 'the old key no longer writes');
+    assert.equal((await kk.request({ method: 'POST', path: '/hook', token: t2, body: ev('new-' + crypto.randomUUID()) })).status, 204, 'the new key does');
+    const st = await kk.request({ path: '/state', token: false });
+    assert.equal(st.status, 200, 'reading still needs no key');
     assert.ok(JSON.parse(st.body).sessions.some(s => s.id === sid), 'the hook\'s event arrived');
     assert.equal(kk.child.exitCode, null, 'the same server, not a replacement');
-  } finally { await kk?.stop(); rmDir(home); }
+  } finally { w?.close(); await kk?.stop(); rmDir(home); }
 });
 
 // A stand-in kitchen of the current version that records what the hook sends. `proof`: 'valid' (holds TEST_TOKEN),
 // 'none' or 'wrong'. `hookStatus` is its /hook answer.
-async function fakeKitchen({ proof = 'valid', hookStatus = 204 } = {}) {
+async function fakeKitchen({ proof = 'valid', hookStatus = 204, v6 } = {}) {
   const hits = [];
   const port = await freePort();
   const srv = http.createServer((req, res) => {
@@ -278,7 +419,7 @@ async function fakeKitchen({ proof = 'valid', hookStatus = 204 } = {}) {
         const headers = { 'content-type': 'application/json', 'x-monkey-kitchen': '1' };
         if (proof === 'valid') headers['x-mk-proof'] = proofFor(req.url);
         if (proof === 'wrong') headers['x-mk-proof'] = proofFor(req.url, WRONG);
-        res.writeHead(200, headers).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: VERSION, root: ROOT }));
+        res.writeHead(200, headers).end(JSON.stringify({ ok: true, app: 'monkey-kitchen', version: VERSION, root: ROOT, ...(v6 === undefined ? {} : { v6 }) }));
         return;
       }
       res.writeHead(req.url === '/hook' ? hookStatus : 204, { 'x-monkey-kitchen': '1' }).end();
@@ -303,11 +444,12 @@ test('the hook challenges /health with a fresh 32-hex nonce, and sends the maste
   for (const h of f.hits.filter(x => x.method === 'GET')) assert.equal(h.headers['x-mk-token'], undefined, `${h.url} carries no key`);
 });
 
-test('with --context the last line is the link with the page key; the master token appears nowhere', async () => {
+test('with --context the last line is the plain link, with no k= and no master token anywhere', async () => {
   const sid = 'link-' + crypto.randomUUID();
   const r = await runNode([HOOK, '--context'], { input: startupInput(sid), env: { MONKEY_KITCHEN_PORT: String(k.port) } });
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(lastLine(r.stdout), `The live kitchen view is at http://localhost:${k.port}/?k=${TEST_PAGE} (this link unlocks the page in your browser; share it only with the user).`);
+  assert.equal(lastLine(r.stdout), plainLink(await k.linkHost(), k.port));
+  assert.ok(!lastLine(r.stdout).includes('k='), 'no key in the link');
   assert.ok(!r.stdout.includes(TEST_TOKEN), 'no master token in the context');
   assert.ok(await k.session(sid), 'the event got in');
 });
@@ -322,7 +464,7 @@ for (const proof of ['none', 'wrong']) {
     assert.equal(r.code, 0, r.stderr);
     assert.ok(r.ms < 3000, `took ${r.ms} ms`);
     assert.match(lastLine(r.stdout), new RegExp(`server on port ${f.port} uses a different key.*Stop it once`));
-    assert.ok(!r.stdout.includes(TEST_PAGE) && !r.stdout.includes(TEST_TOKEN), 'no link, no key');
+    assert.ok(!r.stdout.includes('live kitchen view is at') && !r.stdout.includes(TEST_TOKEN), 'no link, no key');
     const quiet = await runNode([HOOK], { input: JSON.stringify({ session_id: 'lk', hook_event_name: 'UserPromptSubmit', prompt: 'x' }), env });
     assert.equal(quiet.code, 0, quiet.stderr);
     assert.equal(quiet.stdout, '');
@@ -342,7 +484,7 @@ test('a port that never answers: no link and no key in the context, only that th
     const r = await runNode([HOOK, '--context'], { input: startupInput('mute'), env: { MONKEY_KITCHEN_PORT: String(port) } });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(lastLine(r.stdout), `The kitchen view could not be started on port ${port}.`);
-    assert.ok(!r.stdout.includes(TEST_PAGE));
+    assert.ok(!r.stdout.includes(TEST_TOKEN));
   } finally { for (const s of sockets) s.destroy(); await new Promise(r => hold.close(r)); }
 });
 
@@ -355,3 +497,46 @@ test('with no usable home folder the hook sends nothing and says no key file cou
   assert.equal(lastLine(r.stdout), 'The kitchen view is unavailable: no key file could be created in your home folder.');
   assert.deepEqual(f.hits, [], 'the port was not even asked');
 });
+
+// ---------- IPv6 loopback: the link names localhost only when the kitchen also listens on [::1] ----------
+
+// A GET to [::1]:port, or null when this machine has no IPv6 loopback.
+const get6 = (port, p, headers = {}) => new Promise(resolve => {
+  const req = http.get({ host: '::1', family: 6, port, path: p, headers, agent: false }, res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+  req.on('error', () => resolve(null));
+  req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+});
+
+test('/health says whether the kitchen also listens on [::1]; Host [::1]:PORT is accepted, and with v6 on [::1] answers', async () => {
+  const h = JSON.parse((await k.request({ path: '/health', token: false })).body);
+  assert.equal(typeof h.v6, 'boolean');
+  const host6 = { host: `[::1]:${k.port}` };
+  assert.equal((await k.request({ path: '/health', token: false, headers: host6 })).status, 200, 'Host [::1]:PORT accepted');
+  assert.equal((await k.request({ path: '/state', token: false, headers: host6 })).status, 200);
+  assert.equal((await k.request({ path: '/state', token: false, headers: { host: `[::2]:${k.port}` } })).status, 403, 'another address is not');
+  if (!h.v6) return; // no IPv6 loopback here (some CI runners): nothing listens on [::1]
+  assert.equal(await get6(k.port, '/health'), 200, '[::1] answers');
+  assert.equal(await get6(k.port, '/state'), 200, 'with no key, as on 127.0.0.1');
+  assert.equal(await get6(k.port, '/state', { host: `evil.example:${k.port}` }), 403, 'and checks the Host the same way');
+});
+
+test('MONKEY_KITCHEN_NO_V6=1: no [::1] listener, /health v6 false, and the hook\'s link names 127.0.0.1', { timeout: 20000 }, async () => {
+  const kk = await startKitchen({ MONKEY_KITCHEN_NO_V6: '1' });
+  try {
+    assert.equal(JSON.parse((await kk.request({ path: '/health' })).body).v6, false);
+    assert.equal(await get6(kk.port, '/health'), null, 'nothing on [::1]');
+    assert.equal(kk.stdout().split(/\r?\n/)[0], `Monkey Kitchen is open at http://127.0.0.1:${kk.port}`);
+    const r = await runNode([HOOK, '--context'], { input: startupInput('nov6-' + crypto.randomUUID()), env: { MONKEY_KITCHEN_PORT: String(kk.port) } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(lastLine(r.stdout), plainLink('127.0.0.1', kk.port));
+  } finally { await kk.stop(); }
+});
+
+for (const [v6, host] of [[true, 'localhost'], [false, '127.0.0.1'], [undefined, '127.0.0.1']]) {
+  test(`a proven kitchen whose /health has ${v6 === undefined ? 'no v6' : `v6: ${v6}`} gets a link with host ${host}`, async () => {
+    const f = await fakeKitchen({ v6 });
+    const r = await runNode([HOOK, '--context'], { input: startupInput('v6-' + String(v6)), env: { MONKEY_KITCHEN_PORT: String(f.port) } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(lastLine(r.stdout), plainLink(host, f.port));
+  });
+}
